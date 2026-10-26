@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "Hanzi Subs Reactor",
+  "version": "0.1.0",
+  "description": "OCR burned-in Chinese subtitles on any video, translate with DeepL and explore words with an interactive Hanzi dictionary.",
+  "minimum_chrome_version": "116",
+  "permissions": ["storage", "unlimitedStorage", "offscreen", "scripting", "sidePanel"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": [
+        "shared/defaults.js",
+        "shared/log.js",
+        "content/video-observer.js",
+        "content/subtitle-smoother.js",
+        "content/overlay.js",
+        "content/native-subtitles.js",
+        "content/main.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "action": {
+    "default_title": "Hanzi Subs Reactor",
+    "default_popup": "popup/popup.html"
+  },
+  "options_page": "options/options.html",
+  "side_panel": {
+    "default_path": "sidepanel/sidepanel.html"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  }
+}

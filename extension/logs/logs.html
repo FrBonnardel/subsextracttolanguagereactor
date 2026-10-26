@@ -1,0 +1,34 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Hanzi Subs Reactor – Logs</title>
+  <link rel="stylesheet" href="logs.css">
+</head>
+<body>
+  <header>
+    <h1>Logs</h1>
+    <label>Level
+      <select id="level">
+        <option value="debug">Debug</option>
+        <option value="info" selected>Info</option>
+        <option value="warn">Warn</option>
+        <option value="error">Error</option>
+      </select>
+    </label>
+    <input type="search" id="filter" placeholder="Filter…">
+    <label><input type="checkbox" id="follow" checked> Follow</label>
+    <button id="copy">Copy</button>
+    <button id="download">Download</button>
+    <button id="clear" class="danger">Clear</button>
+    <span id="count"></span>
+  </header>
+  <table>
+    <thead><tr><th>Time</th><th>Level</th><th>Source</th><th>Message</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+
+  <script src="../shared/log.js"></script>
+  <script src="logs.js"></script>
+</body>
+</html>

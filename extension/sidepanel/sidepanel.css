@@ -1,0 +1,62 @@
+:root {
+  --bg: #16171a; --card: #1e1f23; --border: #2c2d32; --text: #e8e8e8; --muted: #888;
+  --accent: #9db4ff; --py: #ffd27a; --hz-font: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", "Noto Sans TC", sans-serif;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.45 system-ui, "Segoe UI", sans-serif; }
+main { padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+
+details.section { background: var(--card); border: 1px solid var(--border); border-radius: 8px; }
+details.section > summary { cursor: pointer; padding: 6px 10px; font-weight: 600; color: var(--accent); user-select: none; }
+.section-body { padding: 4px 10px 10px; }
+
+.muted { color: var(--muted); font-size: 12px; }
+.error { color: #ff9e9e; }
+.row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+button, input[type="search"] { font: inherit; color: var(--text); background: #121316; border: 1px solid #3a3b40; border-radius: 6px; padding: 3px 8px; }
+button { cursor: pointer; background: #34363c; border: 0; }
+button:hover { filter: brightness(1.15); }
+button:disabled { opacity: .4; cursor: default; }
+input[type="search"] { flex: 1; min-width: 0; }
+
+/* frame */
+.frame { display: block; width: 100%; border-radius: 4px; border: 1px solid var(--border); margin-top: 6px; image-rendering: auto; }
+.frame.bin { background: #fff; }
+.raw { margin-top: 6px; font-family: var(--hz-font); white-space: pre-wrap; }
+
+/* tokens */
+.hz { font-family: var(--hz-font); }
+.line-text { font-family: var(--hz-font); font-size: 22px; line-height: 2.1; }
+.chip { display: inline-block; cursor: pointer; border-radius: 4px; padding: 0 2px; }
+.chip:hover, .chip.active { background: rgba(255, 205, 60, .25); }
+.chip.unknown { text-decoration: underline dotted rgba(255,255,255,.4); }
+rt { font-size: 11px; color: var(--py); font-family: system-ui, sans-serif; }
+.translation { margin-top: 4px; color: #ccc; font-size: 14px; }
+.badge { font-size: 10px; background: #3b6ef5; color: #fff; padding: 0 6px; border-radius: 9px; vertical-align: middle; }
+.badge.dim { background: #34363c; color: #bbb; }
+
+/* explorer */
+.word-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.word-head .big { font-family: var(--hz-font); font-size: 36px; color: #fff; }
+.word-head .trad { font-family: var(--hz-font); font-size: 22px; color: #aaa; }
+.py { color: var(--py); font-size: 15px; }
+.entry + .entry { border-top: 1px solid var(--border); margin-top: 6px; padding-top: 6px; }
+ol { margin: 2px 0 0; padding-left: 20px; }
+h4 { margin: 12px 0 4px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 600; }
+.char-row, .word-row { display: grid; grid-template-columns: auto auto 1fr; gap: 8px; align-items: baseline; padding: 2px 4px; border-radius: 4px; cursor: pointer; }
+.char-row:hover, .word-row:hover { background: #2a2b30; }
+.char-row .c { font-family: var(--hz-font); font-size: 22px; color: #fff; }
+.word-row .w { font-family: var(--hz-font); font-size: 16px; color: #fff; }
+.char-row .p, .word-row .p { color: var(--py); font-size: 12px; white-space: nowrap; }
+.char-row .d, .word-row .d { color: #bbb; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* history */
+.history { max-height: 55vh; overflow: auto; margin-top: 6px; }
+.history-item { display: flex; gap: 8px; align-items: flex-start; padding: 4px 6px; border-radius: 4px; cursor: pointer; border-bottom: 1px solid #25262a; }
+.history-item:hover { background: #2a2b30; }
+.history-item.latest { background: rgba(157, 180, 255, .08); }
+.history-item .body { flex: 1; min-width: 0; }
+.history-item .zh { font-family: var(--hz-font); font-size: 15px; }
+.history-item .tr { color: #aaa; font-size: 12px; }
+.history-item .time { flex: none; font: 11px ui-monospace, Consolas, monospace; color: var(--accent); background: transparent; padding: 2px 4px; margin-top: 2px; }
+.history-item .time:hover:not(:disabled) { background: #34363c; }

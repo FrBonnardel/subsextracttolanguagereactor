@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <h1>Hanzi Subs Reactor</h1>
+    <div id="domain" class="muted"></div>
+  </header>
+
+  <label class="row"><span>Enabled</span><input type="checkbox" id="enabled"></label>
+  <label class="row"><span>On this site</span><input type="checkbox" id="site"></label>
+  <hr>
+  <label class="row"><span>Pinyin</span><input type="checkbox" data-key="showPinyin"></label>
+  <label class="row"><span>Translation</span><input type="checkbox" data-key="showTranslation"></label>
+  <label class="row"><span>Pause on hover</span><input type="checkbox" data-key="pauseOnHover"></label>
+  <label class="row"><span>Chinese size <output data-out="fontSize"></output></span>
+    <input type="range" min="16" max="64" step="1" data-key="fontSize"></label>
+  <label class="row"><span>Translation size <output data-out="translationFontSize"></output></span>
+    <input type="range" min="10" max="48" step="1" data-key="translationFontSize"></label>
+
+  <p id="warn" class="warn" hidden>No DeepL API key set — translations disabled.</p>
+  <button id="sidepanel">Open side panel</button>
+  <button id="options" class="secondary">All settings…</button>
+  <button id="logs" class="secondary">View logs</button>
+
+  <script src="../shared/defaults.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

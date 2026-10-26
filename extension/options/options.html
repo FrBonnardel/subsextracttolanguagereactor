@@ -1,0 +1,174 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Hanzi Subs Reactor – Settings</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <main>
+    <h1>Hanzi Subs Reactor <a class="logs-link" href="../logs/logs.html" target="_blank">View logs</a></h1>
+
+    <section>
+      <h2>Translation</h2>
+      <label>Translator
+        <select name="translator">
+          <option value="chrome">Chrome built-in (on-device, free)</option>
+          <option value="opus">Opus-MT via Transformers.js (offline, English only)</option>
+          <option value="ollama">Ollama (local LLM)</option>
+          <option value="deepl">DeepL API</option>
+        </select>
+      </label>
+      <label class="check"><input type="checkbox" name="translationContext"> Use the previous subtitle lines as context (DeepL, Ollama, Chrome)</label>
+      <div data-provider="deepl">
+      <label>API key
+        <input type="password" name="deeplKey" autocomplete="off" spellcheck="false" placeholder="xxxxxxxx-xxxx-…:fx">
+      </label>
+      <label>Plan
+        <select name="deeplPlan">
+          <option value="auto">Auto-detect (keys ending in :fx are Free)</option>
+          <option value="free">Free (api-free.deepl.com)</option>
+          <option value="pro">Pro (api.deepl.com)</option>
+        </select>
+      </label>
+      </div>
+      <div data-provider="ollama">
+        <label>Ollama URL <input type="text" name="ollamaUrl" spellcheck="false"></label>
+        <label>Model <input type="text" name="ollamaModel" spellcheck="false" placeholder="qwen2.5:7b"></label>
+        <p class="hint">Start Ollama with <code>OLLAMA_ORIGINS=chrome-extension://*</code> so it accepts requests from the extension.</p>
+      </div>
+      <div data-provider="opus">
+        <p class="hint">Downloads <code>Xenova/opus-mt-zh-en</code> (~100 MB) from Hugging Face once, then runs offline.</p>
+      </div>
+      <label>Target language
+        <select name="targetLang">
+          <option value="EN-US">English (US)</option>
+          <option value="EN-GB">English (UK)</option>
+          <option value="DE">German</option>
+          <option value="FR">French</option>
+          <option value="ES">Spanish</option>
+          <option value="IT">Italian</option>
+          <option value="PT-BR">Portuguese (BR)</option>
+          <option value="PT-PT">Portuguese (PT)</option>
+          <option value="NL">Dutch</option>
+          <option value="PL">Polish</option>
+          <option value="RU">Russian</option>
+          <option value="UK">Ukrainian</option>
+          <option value="JA">Japanese</option>
+          <option value="KO">Korean</option>
+          <option value="ID">Indonesian</option>
+          <option value="TR">Turkish</option>
+          <option value="SV">Swedish</option>
+        </select>
+      </label>
+      <div class="actions">
+        <button type="button" id="prepareModel" data-provider="chrome opus">Prepare model</button>
+        <button type="button" id="testKey">Test translation</button>
+        <button type="button" id="clearCache" class="secondary">Clear translation cache</button>
+        <span id="deeplResult" class="result"></span>
+      </div>
+    </section>
+
+    <section>
+      <h2>Subtitle source</h2>
+      <label>Source
+        <select name="subtitleSource">
+          <option value="auto">Auto – player text if available, otherwise OCR</option>
+          <option value="native">Player text / text tracks only</option>
+          <option value="ocr">OCR only (burned-in subtitles)</option>
+        </select>
+      </label>
+      <label>Subtitle CSS selector (optional) <input type="text" name="subtitleSelector" spellcheck="false" placeholder=".player-subtitle"></label>
+      <label class="check"><input type="checkbox" name="hideNativeSubs"> Hide the player's own subtitles</label>
+    </section>
+
+    <section>
+      <h2>OCR</h2>
+      <label>OCR engine
+        <select name="ocrEngine">
+          <option value="paddle">PaddleOCR v4 on GPU (WebGPU, CPU fallback) – fast</option>
+          <option value="tesseract">Tesseract (CPU)</option>
+        </select>
+      </label>
+      <label>Subtitle script (Tesseract)
+        <select name="ocrLang">
+          <option value="chi_sim">Simplified</option>
+          <option value="chi_tra">Traditional</option>
+          <option value="chi_sim+chi_tra">Both (slower)</option>
+        </select>
+      </label>
+      <label>Image preprocessing
+        <select name="ocrPreprocess">
+          <option value="enhanced">Grayscale + contrast + sharpen (recommended)</option>
+          <option value="binary">Black/white threshold (legacy)</option>
+        </select>
+      </label>
+      <label class="check"><input type="checkbox" name="ocrEdgeBoost"> Strengthen strokes with a dark outline/shadow</label>
+      <label class="check"><input type="checkbox" name="ocrCenteredOnly"> Only read centred text (ignore comments/danmaku/credits on the sides)</label>
+      <label class="check"><input type="checkbox" name="ocrUserWords"> Load dictionary words into Tesseract (user-words, Tesseract only)</label>
+      <label class="check"><input type="checkbox" name="ocrCharWhitelist"> Restrict output to dictionary Hanzi, digits and punctuation (Tesseract only)</label>
+      <label class="check"><input type="checkbox" name="ocrDictCorrection"> Dictionary correction of OCR results (alternative glyphs → valid words)</label>
+      <label>Capture interval (ms) <input type="number" name="captureIntervalMs" min="250" max="5000" step="50"></label>
+      <label>Crop band top (fraction of video height) <input type="number" name="cropTop" min="0" max="0.95" step="0.01"></label>
+      <label>Crop band bottom <input type="number" name="cropBottom" min="0.05" max="1" step="0.01"></label>
+      <label>Brightness threshold (0–255, black/white mode only) <input type="number" name="textThreshold" min="80" max="250" step="1"></label>
+      <label>Subtitle color
+        <select name="subtitleColor">
+          <option value="white">White / light grey</option>
+          <option value="yellow">Yellow</option>
+          <option value="any">Any bright color</option>
+        </select>
+      </label>
+      <label>Minimum OCR confidence (0–100) <input type="number" name="minConfidence" min="0" max="100" step="1"></label>
+      <label>Stable frames before showing a line <input type="number" name="stableFrames" min="1" max="5" step="1"></label>
+      <label>Empty frames before clearing <input type="number" name="clearAfterEmptyFrames" min="1" max="10" step="1"></label>
+    </section>
+
+    <section>
+      <h2>Appearance</h2>
+      <label>Chinese font size (px) <input type="number" name="fontSize" min="12" max="80"></label>
+      <label>Translation font size (px) <input type="number" name="translationFontSize" min="10" max="60"></label>
+      <label>Position
+        <select name="overlayPosition">
+          <option value="above-crop">Above the burned-in subtitles</option>
+          <option value="top">Top of video</option>
+          <option value="below-video">Below video (if space)</option>
+        </select>
+      </label>
+      <label class="check"><input type="checkbox" name="showPinyin"> Show pinyin</label>
+      <label class="check"><input type="checkbox" name="showTranslation"> Show translation</label>
+    </section>
+
+    <section>
+      <h2>Behaviour</h2>
+      <label>Dictionary opens on
+        <select name="hoverMode">
+          <option value="hover">Hover</option>
+          <option value="click">Click</option>
+        </select>
+      </label>
+      <label class="check"><input type="checkbox" name="pauseOnHover"> Pause video while dictionary is open</label>
+      <label>Toggle overlay <input type="text" name="keyToggleOverlay" placeholder="Alt+Shift+S"></label>
+      <label>Toggle translation <input type="text" name="keyToggleTranslation" placeholder="Alt+Shift+T"></label>
+      <label>Toggle pinyin <input type="text" name="keyTogglePinyin" placeholder="Alt+Shift+P"></label>
+    </section>
+
+    <section>
+      <h2>Sites</h2>
+      <label class="check"><input type="checkbox" name="enabled"> Enabled</label>
+      <label>Disabled domains (one per line)
+        <textarea name="disabledDomains" rows="5" spellcheck="false"></textarea>
+      </label>
+    </section>
+
+    <div class="actions">
+      <button type="button" id="reset" class="secondary">Reset to defaults</button>
+      <span id="saved" class="result"></span>
+    </div>
+  </main>
+
+  <script src="../shared/defaults.js"></script>
+  <script src="../shared/log.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>

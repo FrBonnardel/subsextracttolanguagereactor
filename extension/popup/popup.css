@@ -1,0 +1,12 @@
+body { width: 260px; margin: 0; padding: 12px 14px; font: 13px/1.4 system-ui, "Segoe UI", sans-serif; background: #1e1f23; color: #e8e8e8; }
+h1 { font-size: 15px; margin: 0; }
+header { margin-bottom: 10px; }
+.muted { color: #888; font-size: 12px; word-break: break-all; }
+.row { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; gap: 8px; }
+input[type="range"] { width: 110px; }
+hr { border: 0; border-top: 1px solid #333; margin: 8px 0; }
+.warn { color: #ffb36b; font-size: 12px; }
+button { width: 100%; margin-top: 8px; padding: 6px; background: #3b6ef5; color: #fff; border: 0; border-radius: 6px; cursor: pointer; }
+button:hover { background: #2f5ad0; }
+button.secondary { background: #34363c; }
+button.secondary:hover { background: #44464d; }

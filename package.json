@@ -1,0 +1,21 @@
+{
+  "name": "hanzi-subs-reactor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Chrome extension: OCR burned-in Chinese subtitles, DeepL translation, Language Reactor-style dictionary overlay",
+  "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "setup:ocr": "node scripts/setup.mjs --only=ocr",
+    "setup:paddle": "node scripts/setup.mjs --only=paddle",
+    "setup:mt": "node scripts/setup.mjs --only=mt",
+    "setup:dict": "node scripts/setup.mjs --only=dict"
+  },
+  "devDependencies": {
+    "@huggingface/transformers": "^3.8.1",
+    "tesseract.js": "^5.1.1"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
