@@ -6,6 +6,8 @@
   const MIN_INTERVAL = 500; // captureVisibleTab is limited to ~2 calls/sec
   const MIN_DIRECT_INTERVAL = 250;
   const NATIVE_INTERVAL = 250;
+  const NATIVE_CLEAR_DELAY_MS = 1500; // a native line stays this long after its cue ends, unless the next one comes
+  const OCR_CLEAR_DELAY_MS = 500; // OCR already needs a few empty frames to see the line gone; hold it a bit more
   const MAX_INFLIGHT = 3; // frames queued for OCR at once (direct capture)
   const OCR_TIMEOUT_MS = 10_000;
   const THUMB_W = 160;
@@ -13,8 +15,8 @@
   const REPLAY_MAX_LINE_S = 6; // cap for a line whose end was never observed
   const REPLAY_MATCH_S = 0.8; // same text within this many seconds = same dialog line
   const TRANSLATE_BACKLOG = 30; // older untranslated lines beyond this stay untranslated
-  const CONTEXT_LINES = 2; // preceding lines sent as translation context
-  const CONTEXT_WINDOW_S = 15; // only lines this close before the current one count as context
+  const CONTEXT_LINES = 8; // earlier dialog lines of this video sent as translation context
+  const CONTEXT_WINDOW_S = 180; // only lines this close before the current one count as context
   const REVISE_WINDOW_S = 1; // overlapping reads closer than this are one subtitle in transition
   const AD_STALL_MS = 1500; // "playing" with a frozen clock for this long = ad over the video
   const AD_PAUSED_WINDOW_MS = 4000; // 2+ picture changes while paused within this window = ad
@@ -24,6 +26,8 @@
   let settings = await chrome.storage.sync.get(globalThis.HSR_DEFAULTS);
   let visible = true;
   let timer = 0;
+  let nativeClearTimer = 0;
+  let ocrClearTimer = 0;
   let lineSeq = 0;
   let currentLine = null;
   let pausedByUs = false;
@@ -36,6 +40,12 @@
   let recentLines = []; // { text, time } of the last few dialog lines, oldest first
   let lastLive = null; // { seq, text, time, entry, quality } of the last line read live (not replayed)
   let currentContext = [];
+  let story = { page: '', text: '', pending: false, done: false }; // video background for the LLMs, per episode
+
+  // Episode identity: players switch episodes without reloading, changing the URL (pushState) or only the tab title.
+  // Dialogue context, the replay timeline, the panel history and the story are all per episode.
+  const episodeKey = () => `${location.href}\u0000${document.title.replace(/^\(\d+\)\s*/, '').trim()}`;
+  let episode = episodeKey();
 
   const nativeReader = new HSR.NativeSubtitleReader(log);
 
@@ -64,10 +74,21 @@
       replaying = null;
       prevLine = currentLine;
       currentLine = null;
-      overlay.clear();
-      panel('clear');
+      clearLater();
     },
   });
+
+  // Keep the text on screen a little longer for reading; a new line replaces it at once.
+  function clearLater() {
+    clearTimeout(ocrClearTimer);
+    const seq = lineSeq;
+    ocrClearTimer = setTimeout(() => {
+      ocrClearTimer = 0;
+      if (lineSeq !== seq || currentLine) return;
+      overlay.clear();
+      panel('clear');
+    }, OCR_CLEAR_DELAY_MS);
+  }
 
   const tracker = new HSR.VideoTracker({
     onVideoChange(video, old) {
@@ -79,12 +100,15 @@
       resetLine();
       nativeReader.attach(video);
       if (video) {
+        checkEpisode();
         log('info', `Tracking video ${video.videoWidth}x${video.videoHeight} (${video.currentSrc?.slice(0, 80) || 'no src'})`);
         video.addEventListener('seeked', onSeeked);
         video.addEventListener('pause', onPaused);
         video.addEventListener('timeupdate', onTimeUpdate);
         entries(); // starts seeding the replay timeline for this page
         overlay.mount(video);
+        loadStoryContext();
+        warmupTranslator();
       } else {
         if (old) log('info', 'Video gone');
         overlay.unmount();
@@ -269,6 +293,27 @@
     }
   }
 
+  function cancelNativeClear() {
+    clearTimeout(nativeClearTimer);
+    nativeClearTimer = 0;
+    clearTimeout(ocrClearTimer);
+    ocrClearTimer = 0;
+  }
+
+  function scheduleNativeClear() {
+    if (!currentLine || nativeClearTimer) return;
+    const seq = lineSeq;
+    nativeClearTimer = setTimeout(() => {
+      nativeClearTimer = 0;
+      if (!currentLine || lineSeq !== seq) return;
+      prevLine = currentLine;
+      currentLine = null;
+      lineSeq++;
+      overlay.clear();
+      panel('clear');
+    }, NATIVE_CLEAR_DELAY_MS);
+  }
+
   /** @returns true if native subtitles handled this tick (no OCR needed) */
   function readNative() {
     if (settings.subtitleSource === 'ocr') return false;
@@ -280,21 +325,17 @@
     }
     logState(`reading native subtitles (${nat.source})`);
     if (!nat.text) {
-      if (currentLine) {
-        prevLine = currentLine;
-        currentLine = null;
-        lineSeq++;
-        overlay.clear();
-        panel('clear');
-      }
-    } else if (nat.text !== currentLine) {
-      onLine(nat.text, tracker.video?.currentTime);
+      scheduleNativeClear();
+    } else {
+      cancelNativeClear();
+      if (nat.text !== currentLine) onLine(nat.text, tracker.video?.currentTime);
     }
     return true;
   }
 
   async function tick() {
     try {
+      checkEpisode();
       const v = tracker.video;
       if (v && visible && enabledHere()) updateAdState(v, performance.now());
       const reason = ad.active ? `ad playing (${ad.reason})` : idleReason();
@@ -405,8 +446,8 @@
   let lastPlayTime = 0;
 
   function entries() {
-    if (timeline.key !== location.href) {
-      timeline = { key: location.href, entries: [] };
+    if (timeline.key !== episode) {
+      timeline = { key: episode, entries: [] };
       seedTimeline();
     }
     return timeline.entries;
@@ -469,8 +510,7 @@
       prevLine = currentLine;
       currentLine = null;
       smoother.reset();
-      overlay.clear();
-      panel('clear');
+      clearLater();
     }
   }
 
@@ -482,6 +522,7 @@
   }
 
   async function onPaused() {
+    loadStoryContext();
     if (pausedByUs || !visible || !enabledHere() || dead || ad.active) return;
     if (!usingNative) {
       epoch++; // results for frames captured before the pause are stale
@@ -494,7 +535,90 @@
     }
   }
 
+  const storyEnabled = () => settings.storyContext && ['ollama', 'nano'].includes(settings.translator);
+  const storyText = () => (storyEnabled() && story.page === episode ? story.text : '');
+
+  function pageText(selectors) {
+    for (const sel of selectors) {
+      const el = document.querySelector(sel);
+      const text = (el?.content ?? el?.innerText ?? '').trim();
+      if (text) return text;
+    }
+    return '';
+  }
+
+  function readPageInfo() {
+    // SPA players (YouTube, Bilibili) keep the first video's <meta> tags after navigation; trust them only if they match.
+    const ogUrl = document.querySelector('meta[property="og:url"]')?.content;
+    const metaFresh = !ogUrl || new URL(ogUrl, location.href).pathname === location.pathname;
+    const meta = (sels) => (metaFresh ? pageText(sels) : '');
+    return {
+      page: location.href,
+      // The tab title names the show on almost every site ("全职法师第7季-02-免费在线观看-爱壹帆").
+      title: document.title,
+      altTitle: meta(['meta[property="og:title"]', 'meta[name="twitter:title"]']) || pageText(['ytd-watch-metadata h1', 'h1']),
+      description:
+        pageText(['ytd-watch-metadata #description-inline-expander', '.desc-info-text', '.basic-desc-info'])
+        || meta(['meta[property="og:description"]', 'meta[name="description"]']),
+    };
+  }
+
+  // Runs in the background when the video is found (usually before it starts) or paused, never on the subtitle path:
+  // lines translated before it arrives keep their translation, later lines use the context.
+  async function loadStoryContext() {
+    if (!storyEnabled() || story.pending || (story.page === episode && story.done)) return;
+    const info = readPageInfo();
+    if (!info.title && !info.altTitle) return;
+    const page = episode;
+    const had = story.page === page ? story.text : '';
+    story = { page, text: had, pending: true, done: false };
+    const res = await send({ type: 'STORY_CONTEXT', info });
+    if (story.page !== page || !story.pending) return; // episode changed meanwhile
+    // Incomplete (Wikipedia unreachable): keep the page details and try again on the next pause.
+    story = { page, text: res?.story || had, pending: false, done: !!res?.complete };
+    if (story.text && story.text !== had) {
+      log('info', `Story context: ${res.wikiTitle ? `Wikipedia "${res.wikiTitle}"` : 'page title/description only'}`);
+      warmupTranslator();
+    }
+  }
+
+  // Gemini Nano: build its session (system prompt + story) before the first subtitle needs it.
+  function warmupTranslator() {
+    if (settings.translator !== 'nano' || !settings.showTranslation || !enabledHere()) return;
+    const t0 = performance.now();
+    send({ type: 'NANO_WARMUP', story: storyText() }).then((res) => {
+      if (res?.ok) log('debug', `Gemini Nano warmed up in ${Math.round(performance.now() - t0)} ms`);
+      else if (res?.reason) log('info', `Gemini Nano not ready: ${res.reason}`);
+    });
+  }
+
+  // Gemini Nano keep-alive while playing: the offscreen side only prompts when the model has been idle.
+  const KEEPALIVE_MS = 2000;
+  setInterval(() => {
+    const video = tracker.video;
+    if (!video || video.paused || video.ended || document.hidden) return;
+    if (settings.translator !== 'nano' || !settings.nanoKeepalive || !settings.showTranslation || !enabledHere()) return;
+    send({ type: 'NANO_KEEPALIVE', story: storyText() });
+  }, KEEPALIVE_MS);
+
+  function checkEpisode() {
+    const key = episodeKey();
+    if (key === episode) return;
+    episode = key;
+    log('info', `New episode: "${document.title}" – dialogue context and history reset`);
+    resetLine();
+    trQueue.length = 0; // older lines of the previous episode are not worth translating any more
+    story = { page: '', text: '', pending: false, done: false };
+    panel('episode', { page: episode });
+    if (tracker.video) {
+      entries(); // seeds the replay timeline if this episode was watched before
+      loadStoryContext();
+      warmupTranslator();
+    }
+  }
+
   function resetLine() {
+    cancelNativeClear();
     epoch++;
     lineSeq++;
     currentLine = null;
@@ -506,11 +630,29 @@
     panel('clear');
   }
 
+  /**
+   * Earlier dialog of this video, oldest first, as { text, ago } (seconds before the current line).
+   * Uses the replay timeline (survives seeks and reloads) plus the lines just read live.
+   */
   function contextFor(text, time) {
-    return recentLines
-      .filter((l) => l.text !== text && (time == null || l.time == null || (l.time <= time && time - l.time <= CONTEXT_WINDOW_S)))
+    const known = time != null && Number.isFinite(time);
+    const lines = [];
+    if (known && !usingNative) {
+      for (const e of entries()) {
+        if (e.start < time - 0.05 && time - e.start <= CONTEXT_WINDOW_S) lines.push({ text: e.text, time: e.start });
+      }
+    }
+    for (const l of recentLines) {
+      if (known && l.time != null && (l.time > time || time - l.time > CONTEXT_WINDOW_S)) continue;
+      if (!lines.some((x) => x.text === l.text && (x.time == null || l.time == null || Math.abs(x.time - l.time) < REPLAY_MATCH_S))) {
+        lines.push(l);
+      }
+    }
+    return lines
+      .sort((a, b) => (a.time ?? Infinity) - (b.time ?? Infinity))
+      .filter((l, i, all) => l.text !== text && l.text !== all[i + 1]?.text)
       .slice(-CONTEXT_LINES)
-      .map((l) => l.text);
+      .map((l) => ({ text: l.text, ago: known && l.time != null ? Math.round(time - l.time) : 0 }));
   }
 
   // Share of the shorter line's characters found in the longer one (punctuation ignored).
@@ -557,6 +699,7 @@
    *   cache; quality = 0..1 read quality from OCR
    */
   async function onLine(text, time = tracker.video?.currentTime, { cached = null, quality = null } = {}) {
+    cancelNativeClear();
     const revises = cached ? null : revisionOf(text, time);
     if (revises && !isBetterRead(text, quality, revises)) {
       log('debug', `Kept "${revises.text}" (q ${revises.quality?.toFixed(2)}) over worse read "${text}" (q ${quality?.toFixed(2)})`);
@@ -594,7 +737,7 @@
       text,
       source: cached ? 'replay' : usingNative ? 'native' : 'ocr',
       time: time ?? null,
-      page: location.href,
+      page: episode,
       replay: !!cached,
       replaces: revises?.seq,
     });
@@ -649,7 +792,7 @@
     const t0 = performance.now();
     let res;
     try {
-      res = await send({ type: 'TRANSLATE', text: job.text, context: job.context });
+      res = await send({ type: 'TRANSLATE', text: job.text, context: job.context, story: storyText() });
     } finally {
       trBusy = false;
     }
@@ -666,7 +809,7 @@
     const translation = res.error ?? res.translation;
     if (!res.error && entry) entry.translation = translation;
     const onScreen = text === currentLine;
-    log('debug', `Translated in ${Math.round(ms)} ms${res.cached ? ' (cached)' : ''}${onScreen ? '' : ' (history only)'}: "${text}" → "${translation}"`);
+    log('debug', `Translated via ${res.via?.provider ?? '?'}${res.via?.model ? ` (${res.via.model})` : ''} in ${Math.round(ms)} ms${res.cached ? ' (cached)' : ''}${onScreen ? '' : ' (history only)'}: "${text}" → "${translation}"`);
     panel('translation', { seq, text: translation, error: !!res.error });
     if (res.error) log('error', 'Translate:', res.error);
     if (onScreen) {
@@ -680,6 +823,7 @@
     overlay.setVisible(on);
     nativeReader.setHideNative(on && settings.hideNativeSubs);
     if (!on) {
+      cancelNativeClear();
       smoother.reset();
       currentLine = null;
       prevLine = null;
@@ -733,6 +877,8 @@
     overlay.applySettings(settings);
     applyActive();
     const retranslate = ['targetLang', 'translator', 'ollamaModel', 'deeplKey'].some((k) => settings[k] !== before[k]);
+    if (tracker.video) loadStoryContext(); // no-op unless story context just became enabled for this page
+    if (tracker.video && settings.translator !== before.translator) warmupTranslator();
     if (currentLine && settings.showTranslation && (retranslate || !before.showTranslation)) {
       translateLine(currentLine, currentSeq);
     }
@@ -741,6 +887,7 @@
   function shutdown() {
     dead = true;
     clearTimeout(timer);
+    cancelNativeClear();
     nativeReader.setHideNative(false);
     tracker.stop();
     overlay.unmount();

@@ -3,13 +3,15 @@ globalThis.HSR_DEFAULTS = Object.freeze({
   enabled: true,
   disabledDomains: [],
 
-  translator: 'chrome', // 'chrome' (built-in on-device) | 'opus' (Transformers.js) | 'ollama' | 'deepl'
+  translator: 'nano', // 'nano' (Gemini Nano on-device LLM, falls back to 'chrome') | 'chrome' (built-in on-device) | 'opus' (Transformers.js) | 'ollama' | 'deepl'
   targetLang: 'EN-US',
-  translationContext: true, // send the previous subtitle lines as context (DeepL, Ollama, Chrome)
+  translationContext: true, // send earlier dialog of this video as context (DeepL, Ollama, Gemini Nano, Chrome)
   deeplKey: '',
   deeplPlan: 'auto', // 'auto' | 'free' | 'pro'
   ollamaUrl: 'http://localhost:11434',
   ollamaModel: 'qwen2.5:7b',
+  storyContext: false, // LLM translators: use the tab title/description + a Wikipedia synopsis as background
+  nanoKeepalive: true, // Gemini Nano: tiny prompt every ~2 s of idle playback so the GPU stays clocked up between lines
 
   subtitleSource: 'auto', // 'auto' (native text if found, else OCR) | 'native' | 'ocr'
   subtitleSelector: '', // optional CSS selector for player-rendered subtitle text
@@ -35,6 +37,12 @@ globalThis.HSR_DEFAULTS = Object.freeze({
   fontSize: 30,
   translationFontSize: 20,
   overlayPosition: 'above-crop', // 'above-crop' | 'top' | 'below-video'
+  overlayY: null, // set by dragging the subtitles: their bottom edge as a fraction of the video height
+  blurBox: false, // frosted band over subtitles burned into the video (e.g. English)
+  blurTop: 0.6, // band edges as fractions of the video height; move/resize by dragging it on the video
+  blurBottom: 0.74,
+  blurWidth: 0.9,
+  blurStrength: 14, // px
   showPinyin: true,
   showTranslation: true,
 

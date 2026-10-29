@@ -1,6 +1,7 @@
 import '../shared/defaults.js';
 import '../shared/log.js';
 import { translate, clearTranslationCache } from './translate.js';
+import { storyContext } from './story-context.js';
 
 const OFFSCREEN_PATH = 'offscreen/offscreen.html';
 const MAX_LOGS = 1000;
@@ -27,6 +28,14 @@ globalThis.HSR_logSink = async (entry) => {
 };
 
 HSR_captureErrors('background');
+
+function describeVia(via) {
+  if (!via) return 'unknown';
+  const parts = [via.fallbackFrom ? `${via.provider} (fallback from ${via.fallbackFrom}: ${via.reason ?? 'not available'})` : via.provider];
+  if (via.model) parts.push(`model ${via.model}`, `prompt v${via.prompt}`, via.story ? 'story context' : 'no story context');
+  parts.push(`${via.contextLines} context line${via.contextLines === 1 ? '' : 's'}${via.prefilled ? ' (prefilled)' : ''}`);
+  return parts.join(', ');
+}
 
 // Open side panels keep a port; frame debug images are only produced while one is connected.
 let panelPorts = 0;
@@ -104,7 +113,33 @@ const handlers = {
   EXPLORE: (msg) => toOffscreen('EXPLORE', { word: msg.word }),
 
   async TRANSLATE(msg) {
-    return translate(msg.text, await getSettings(), toOffscreen, msg.context ?? []);
+    const t0 = performance.now();
+    const settings = await getSettings();
+    const res = await translate(msg.text, settings, toOffscreen, msg.context ?? [], msg.story ?? '');
+    log('info', `Translate via ${describeVia(res.via)}${res.cached ? ' (cached)' : ` in ${Math.round(performance.now() - t0)} ms`}: "${msg.text}" → "${res.translation}"`);
+    return res;
+  },
+
+  NANO_WARMUP: async (msg) => {
+    const settings = await getSettings();
+    if (settings.translator !== 'nano') return { ok: false };
+    const { target } = globalThis.HSR_langPair(settings);
+    return toOffscreen('NANO_WARMUP', { to: target, story: settings.storyContext ? msg.story ?? '' : '' });
+  },
+
+  NANO_KEEPALIVE: async (msg) => {
+    const settings = await getSettings();
+    if (settings.translator !== 'nano' || !settings.nanoKeepalive) return { ok: false };
+    const { target } = globalThis.HSR_langPair(settings);
+    return toOffscreen('NANO_KEEPALIVE', { to: target, story: settings.storyContext ? msg.story ?? '' : '' });
+  },
+
+  async STORY_CONTEXT(msg) {
+    const settings = await getSettings();
+    if (!settings.storyContext || !['ollama', 'nano'].includes(settings.translator)) return { story: '' };
+    const res = await storyContext(msg.info);
+    log('info', `Story context for "${msg.info.title}"${res.cached ? ' (cached)' : ''}: ${res.wikiTitle ? `Wikipedia "${res.wikiTitle}"` : 'no Wikipedia match'}`);
+    return res;
   },
 
   CLEAR_TRANSLATION_CACHE: () => clearTranslationCache(),

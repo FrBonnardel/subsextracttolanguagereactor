@@ -1,7 +1,7 @@
 export default {
   id: 'frame',
   title: 'Captured frame',
-  open: true,
+  open: false,
   mount(root, { bus, el }) {
     const hint = el('div', 'muted', 'The OCR input appears here while OCR is running. Native subtitle mode reads text directly and skips this.');
     const crop = el('img', 'frame');

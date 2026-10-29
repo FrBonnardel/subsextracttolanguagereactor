@@ -13,13 +13,25 @@
       <h2>Translation</h2>
       <label>Translator
         <select name="translator">
-          <option value="chrome">Chrome built-in (on-device, free)</option>
+          <option value="nano">Gemini Nano (Chrome on-device LLM, free, natural dialogue)</option>
+          <option value="chrome">Chrome built-in (on-device, free, literal)</option>
           <option value="opus">Opus-MT via Transformers.js (offline, English only)</option>
           <option value="ollama">Ollama (local LLM)</option>
           <option value="deepl">DeepL API</option>
         </select>
       </label>
-      <label class="check"><input type="checkbox" name="translationContext"> Use the previous subtitle lines as context (DeepL, Ollama, Chrome)</label>
+      <label class="check"><input type="checkbox" name="translationContext"> Use earlier dialogue of this video as context (DeepL, Ollama, Gemini Nano, Chrome)</label>
+      <div data-provider="nano">
+        <p class="hint">Runs Chrome's built-in Gemini Nano model locally – no API key, no server. It follows the same natural-dialogue instructions as Ollama and reads up to eight earlier lines of this video. Needs Chrome 138+ with a capable GPU (or 16 GB RAM) and ~22 GB free disk; click <b>Prepare model</b> once to download it (~2 GB). Best output quality in English, Spanish and Japanese.</p>
+      </div>
+      <div data-provider="ollama nano">
+        <label class="check"><input type="checkbox" name="storyContext"> Use video background as story context</label>
+        <p class="hint">When a video is found (usually before it starts) or paused, reads the tab title and page description once per page and looks up a short synopsis on Wikipedia (sends the title to wikipedia.org). The model uses it for names, relationships and terminology. Scripts or transcripts are never fetched.</p>
+      </div>
+      <div data-provider="nano">
+        <label class="check"><input type="checkbox" name="nanoKeepalive"> Keep the GPU ready during playback</label>
+        <p class="hint">Runs a tiny Gemini Nano prompt when it has been idle for ~2 s while a video plays, so the GPU does not ramp down between subtitles. Uses some extra GPU power; stops when the video is paused or the tab is hidden.</p>
+      </div>
       <div data-provider="deepl">
       <label>API key
         <input type="password" name="deeplKey" autocomplete="off" spellcheck="false" placeholder="xxxxxxxx-xxxx-…:fx">
@@ -35,6 +47,7 @@
       <div data-provider="ollama">
         <label>Ollama URL <input type="text" name="ollamaUrl" spellcheck="false"></label>
         <label>Model <input type="text" name="ollamaModel" spellcheck="false" placeholder="qwen2.5:7b"></label>
+        <p class="hint">Ollama is instructed to translate intended meaning naturally, using supplied dialogue for ambiguous words, tone, and story continuity. It does not see the video; enable subtitle context above for preceding dialogue and story context for the show's background.</p>
         <p class="hint">Start Ollama with <code>OLLAMA_ORIGINS=chrome-extension://*</code> so it accepts requests from the extension.</p>
       </div>
       <div data-provider="opus">
@@ -62,7 +75,7 @@
         </select>
       </label>
       <div class="actions">
-        <button type="button" id="prepareModel" data-provider="chrome opus">Prepare model</button>
+        <button type="button" id="prepareModel" data-provider="chrome nano opus">Prepare model</button>
         <button type="button" id="testKey">Test translation</button>
         <button type="button" id="clearCache" class="secondary">Clear translation cache</button>
         <span id="deeplResult" class="result"></span>
@@ -135,6 +148,11 @@
           <option value="below-video">Below video (if space)</option>
         </select>
       </label>
+      <p class="hint">You can also drag the subtitles up or down on the video; choosing a position here or <button type="button" id="resetOverlayY">Reset dragged position</button> goes back to it.</p>
+      <label class="check"><input type="checkbox" name="blurBox"> Blur subtitles already in the video</label>
+      <p class="hint">Adds a frosted band over the video, e.g. to hide burned-in English subtitles. Drag it on the video to move it, drag its top or bottom edge to resize. Keep it off the Chinese subtitles when OCR uses tab screenshots, since it would be captured too.</p>
+      <label>Blur strength (px) <input type="number" name="blurStrength" min="2" max="40"></label>
+      <label>Blur width (fraction of video width) <input type="number" name="blurWidth" min="0.2" max="1" step="0.05"></label>
       <label class="check"><input type="checkbox" name="showPinyin"> Show pinyin</label>
       <label class="check"><input type="checkbox" name="showTranslation"> Show translation</label>
     </section>

@@ -1,6 +1,6 @@
 import { OcrEngine } from './ocr.js';
 import { Dictionary } from './dictionary.js';
-import { translateLocal } from './translator.js';
+import { translateLocal, warmupNano, keepaliveNano } from './translator.js';
 
 const log = (level, ...parts) => HSR_log(level, 'offscreen', ...parts);
 
@@ -19,6 +19,8 @@ const handlers = {
     return { tokens: dict.analyze(text) };
   },
   TRANSLATE_LOCAL: (msg) => translateLocal(msg),
+  NANO_WARMUP: (msg) => warmupNano(msg),
+  NANO_KEEPALIVE: (msg) => keepaliveNano(msg),
   async EXPLORE({ word }) {
     await dict.ready();
     return dict.explore(word);

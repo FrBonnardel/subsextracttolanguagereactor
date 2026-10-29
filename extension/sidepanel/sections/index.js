@@ -6,4 +6,4 @@ import line from './line.js';
 import explorer from './explorer.js';
 import history from './history.js';
 
-export default [status, frame, line, explorer, history];
+export default [history, explorer, line, status, frame];

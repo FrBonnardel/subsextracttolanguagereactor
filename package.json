@@ -5,6 +5,7 @@
   "type": "module",
   "description": "Chrome extension: OCR burned-in Chinese subtitles, DeepL translation, Language Reactor-style dictionary overlay",
   "scripts": {
+    "test": "node --test",
     "setup": "node scripts/setup.mjs",
     "setup:ocr": "node scripts/setup.mjs --only=ocr",
     "setup:paddle": "node scripts/setup.mjs --only=paddle",

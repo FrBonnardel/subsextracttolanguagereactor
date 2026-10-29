@@ -37,6 +37,25 @@
       .join(' ');
   }
 
+  /** Cue text for log samples: tags removed, any language kept. */
+  function sampleCueText(raw) {
+    return String(raw ?? '')
+      .replace(/<[^>]+>/g, '')
+      .replace(/\{\\[^}]*\}/g, '')
+      .split(/\n+/)
+      .map((l) => l.replace(/\s+/g, ' ').trim())
+      .filter(Boolean)
+      .join(' / ')
+      .slice(0, 120);
+  }
+
+  function fmtTime(s) {
+    const t = Math.max(0, Math.floor(s ?? 0));
+    const h = Math.floor(t / 3600);
+    const m = String(Math.floor((t % 3600) / 60)).padStart(h ? 2 : 1, '0');
+    return `${h ? `${h}:` : ''}${m}:${String(t % 60).padStart(2, '0')}`;
+  }
+
   function describe(el) {
     const parts = [];
     for (let n = el; n && n !== document.body && parts.length < 4; n = n.parentElement) {
@@ -84,6 +103,8 @@
       this.video = video;
       this.container = null;
       this.lastSource = null;
+      this.sourceLogged = false;
+      this.lastTracks = null;
       this.candidates.clear();
       this.confirmed.clear();
     }
@@ -106,13 +127,43 @@
     read(selector) {
       const v = this.video;
       if (!v) return null;
+      this._logTracks(v);
       const result = this._readTracks(v) ?? this._readDom(v, selector);
       const source = result?.source ?? null;
-      if (source !== this.lastSource) {
+      if (source !== this.lastSource || !this.sourceLogged) {
+        this.sourceLogged = true;
         this.lastSource = source;
-        if (source) this.log('info', `Native subtitles detected via ${source}`);
+        this.log('info', source
+          ? `Native subtitles detected via ${source === 'track' ? 'subtitle track (all upcoming lines known)' : 'page element'}`
+          : 'No native subtitle track or element found – using OCR');
       }
       return result;
+    }
+
+    /** Logs the video's text tracks whenever the list (or a track's cue count/mode) changes, with sample lines. */
+    _logTracks(v) {
+      const list = [...v.textTracks];
+      const tracks = list.map((t) => `${t.kind} "${t.label || '?'}" [${t.language || '?'}] ${t.mode}, ${t.cues?.length ?? 0} cues`);
+      const key = tracks.join(' | ');
+      if (key === this.lastTracks) return;
+      this.lastTracks = key;
+      if (!list.length) {
+        this.log('info', 'Video has no text tracks');
+        return;
+      }
+      this.log('info', `Video has ${list.length} text track${list.length === 1 ? '' : 's'}`);
+      list.forEach((t, i) => {
+        const cues = [...(t.cues ?? [])].filter((c) => sampleCueText(c.text));
+        // Cues of a disabled track are not loaded by the browser, so there is nothing to sample yet.
+        const samples = cues.length
+          ? [...new Set([0, 1, 2, Math.floor(cues.length / 2), cues.length - 1])]
+            .filter((n) => n < cues.length)
+            .map((n) => `\n    ${fmtTime(cues[n].startTime)} ${sampleCueText(cues[n].text)}`)
+            .join('')
+          : t.mode === 'disabled' ? ' (disabled: cues not loaded)' : '';
+        const usable = cues.some((c) => cleanCueText(c.text ?? '')) ? '' : cues.length ? ' – no Chinese lines' : '';
+        this.log('info', `  #${i + 1} ${tracks[i]}${usable}${samples}`);
+      });
     }
 
     _readTracks(v) {

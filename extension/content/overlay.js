@@ -28,6 +28,21 @@
     .box.no-py rt { display: none; }
     .status { font: 11px system-ui, sans-serif; color: #fbb; background: rgba(0,0,0,.6); padding: 1px 6px; border-radius: 4px; }
     .status:empty { display: none; }
+    .box { cursor: grab; touch-action: none; }
+    .box.dragging, .blur.dragging { cursor: grabbing; user-select: none; }
+    .box .word { cursor: pointer; }
+
+    /* Hides subtitles burned into the video (e.g. English) under a frosted band. */
+    .blur {
+      position: fixed; left: 0; top: 0; display: none; pointer-events: auto; touch-action: none; cursor: grab;
+      backdrop-filter: blur(var(--blur, 14px)); -webkit-backdrop-filter: blur(var(--blur, 14px));
+      background: rgba(0,0,0,var(--blur-dim, .25)); border-radius: 6px; box-sizing: border-box;
+    }
+    .blur.on { display: block; }
+    .blur:hover, .blur.dragging { outline: 1px dashed rgba(255,255,255,.55); }
+    .blur .edge { position: absolute; left: 0; right: 0; height: 8px; cursor: ns-resize; }
+    .blur .edge.t { top: -4px; }
+    .blur .edge.b { bottom: -4px; }
 
     .card {
       position: fixed; width: 340px; max-height: 60vh; overflow: auto; pointer-events: auto;
@@ -90,9 +105,13 @@
       this.box.append(this.zh, this.tr, this.status);
       this.card = el('div', 'card');
       this.card.hidden = true;
-      root.append(this.box, this.card);
+      this.blur = el('div', 'blur');
+      this.blur.title = 'Drag to move, drag the top/bottom edge to resize';
+      this.blur.append(el('div', 'edge t'), el('div', 'edge b'));
+      root.append(this.blur, this.box, this.card);
 
       this._bindEvents();
+      this._bindDrag();
     }
 
     // ---- mounting / layout -------------------------------------------------
@@ -116,17 +135,21 @@
       this.box.style.setProperty('--tr-size', `${s.translationFontSize}px`);
       this.box.classList.toggle('no-py', !s.showPinyin);
       this.box.classList.toggle('no-tr', !s.showTranslation);
+      this.blur.style.setProperty('--blur', `${s.blurStrength ?? 14}px`);
       this.layout(this.rect);
     }
 
     setVisible(visible) {
       this.box.classList.toggle('hidden', !visible);
+      this.hiddenAll = !visible;
+      this._layoutBlur();
       if (!visible) this.closeCard();
     }
 
     layout(rect) {
       this.rect = rect;
       if (this.video) this.mount(this.video);
+      this._layoutBlur();
       if (!rect) {
         this.box.style.visibility = 'hidden';
         return;
@@ -136,7 +159,10 @@
       const cx = rect.left + rect.width / 2;
       let y;
       let ty = '-100%';
-      if (s.overlayPosition === 'top') {
+      if (s.overlayY != null) {
+        // Dragged by the user: bottom of the subtitles at this fraction of the video height.
+        y = rect.top + rect.height * s.overlayY;
+      } else if (s.overlayPosition === 'top') {
         y = rect.top + rect.height * 0.04;
         ty = '0';
       } else if (s.overlayPosition === 'below-video' && rect.top + rect.height + 120 < innerHeight) {
@@ -148,6 +174,98 @@
       }
       this.box.style.maxWidth = `${Math.min(rect.width * 0.96, innerWidth * 0.96)}px`;
       this.box.style.transform = `translate(${cx}px, ${y}px) translate(-50%, ${ty})`;
+    }
+
+    _layoutBlur() {
+      const s = this.settings;
+      const r = this.rect;
+      const on = !!(s.blurBox && r && !this.hiddenAll && s.enabled !== false);
+      this.blur.classList.toggle('on', on);
+      if (!on) return;
+      const top = r.top + r.height * s.blurTop;
+      const height = Math.max(8, r.height * (s.blurBottom - s.blurTop));
+      const width = r.width * (s.blurWidth ?? 0.9);
+      Object.assign(this.blur.style, {
+        left: `${r.left + (r.width - width) / 2}px`, top: `${top}px`, width: `${width}px`, height: `${height}px`,
+      });
+    }
+
+    // ---- dragging: subtitles move up/down, the blur band moves and resizes; saved as video fractions ----
+
+    _bindDrag() {
+      const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+      const save = (patch) => {
+        Object.assign(this.settings, patch);
+        chrome.storage.sync.set(patch).catch(() => {});
+      };
+      const drag = (target, onStart, onMove, onEnd) => {
+        target.addEventListener('pointerdown', (e) => {
+          if (e.button !== 0 || !this.rect) return;
+          const start = { x: e.clientX, y: e.clientY, ...onStart(e) };
+          let moved = false;
+          const move = (ev) => {
+            const dy = ev.clientY - start.y;
+            if (!moved && Math.abs(dy) < 4) return; // a click on a word, not a drag
+            if (!moved) {
+              moved = true;
+              target.setPointerCapture(e.pointerId);
+              target.classList.add('dragging');
+              this.closeCard();
+            }
+            onMove(dy / this.rect.height, start);
+          };
+          const up = () => {
+            target.removeEventListener('pointermove', move);
+            target.removeEventListener('pointerup', up);
+            target.removeEventListener('pointercancel', up);
+            if (!moved) return;
+            target.classList.remove('dragging');
+            this.draggedAt = performance.now();
+            onEnd();
+          };
+          target.addEventListener('pointermove', move);
+          target.addEventListener('pointerup', up);
+          target.addEventListener('pointercancel', up);
+        });
+      };
+
+      drag(
+        this.box,
+        () => {
+          const b = this.box.getBoundingClientRect();
+          return { y0: (b.bottom - this.rect.top) / this.rect.height };
+        },
+        (d, st) => {
+          this.settings.overlayY = clamp(st.y0 + d, 0.08, 1.15);
+          this.layout(this.rect);
+        },
+        () => save({ overlayY: Math.round(this.settings.overlayY * 1000) / 1000 }),
+      );
+
+      drag(
+        this.blur,
+        (e) => ({
+          mode: e.target.classList.contains('t') ? 'top' : e.target.classList.contains('b') ? 'bottom' : 'move',
+          top: this.settings.blurTop,
+          bottom: this.settings.blurBottom,
+        }),
+        (d, st) => {
+          const s = this.settings;
+          if (st.mode === 'top') s.blurTop = clamp(st.top + d, 0, st.bottom - 0.02);
+          else if (st.mode === 'bottom') s.blurBottom = clamp(st.bottom + d, st.top + 0.02, 1);
+          else {
+            const h = st.bottom - st.top;
+            s.blurTop = clamp(st.top + d, 0, 1 - h);
+            s.blurBottom = s.blurTop + h;
+          }
+          this._layoutBlur();
+        },
+        () => save({
+          blurTop: Math.round(this.settings.blurTop * 1000) / 1000,
+          blurBottom: Math.round(this.settings.blurBottom * 1000) / 1000,
+        }),
+      );
+      for (const t of STOP_EVENTS) this.blur.addEventListener(t, (e) => e.stopPropagation());
     }
 
     // ---- content -----------------------------------------------------------
@@ -318,7 +436,7 @@
 
       this.zh.addEventListener('click', (e) => {
         const w = wordOf(e.target);
-        if (!w) return;
+        if (!w || performance.now() - (this.draggedAt ?? 0) < 300) return; // the click ending a drag
         if (this.cardOpen && this.activeWord === w && !isHover()) this.closeCard();
         else this.openCard(w);
       });

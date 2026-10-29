@@ -21,16 +21,20 @@ export default {
     root.append(tools, list);
 
     // Recorded by the service worker into storage.session, so lines are kept while the panel is closed.
+    // Only the current episode is shown; earlier episodes stay stored for their replay timeline.
     let tabId = null;
     let items = [];
+    let page = null; // episode shown: from the page's 'episode'/'line' events, else the latest stored line's
     const key = () => `hist:${tabId}`;
+    const shown = () => (page == null ? items : items.filter((i) => i.page == null || i.page === page));
     const seek = (time, play) => chrome.tabs.sendMessage(tabId, { type: 'HSR_SEEK', time, play }).catch(() => {});
 
     function render(scrollToEnd) {
       const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 60;
-      count.textContent = `${items.length} lines`;
-      list.replaceChildren(...items.map((item, i) => {
-        const row = el('div', `history-item${i === items.length - 1 ? ' latest' : ''}`);
+      const visible = shown();
+      count.textContent = `${visible.length} lines`;
+      list.replaceChildren(...visible.map((item, i) => {
+        const row = el('div', `history-item${i === visible.length - 1 ? ' latest' : ''}`);
         const time = el('button', 'time', formatTime(item.time));
         time.title = 'Jump here without playing';
         time.disabled = item.time == null;
@@ -54,6 +58,7 @@ export default {
 
     async function load() {
       items = tabId == null ? [] : (await chrome.storage.session.get(key()))[key()] ?? [];
+      page = items.findLast((i) => i.page != null)?.page ?? null;
       render(true);
     }
 
@@ -62,8 +67,17 @@ export default {
       load();
     });
 
+    bus.on('episode', (d) => {
+      page = d.page ?? null;
+      render(true);
+    });
+
     // Show lines the moment the page reports them; storage updates (below) remain the source of truth.
     bus.on('line', (d) => {
+      if (d.page != null && d.page !== page) {
+        page = d.page;
+        render(true);
+      }
       if (d.replay) return;
       const replaced = d.replaces != null ? items.findLast((i) => i.seq === d.replaces) : null;
       if (replaced) {
@@ -72,7 +86,7 @@ export default {
         return;
       }
       if (items[items.length - 1]?.text === d.text) return;
-      items = [...items, { seq: d.seq, text: d.text, time: d.time, at: Date.now(), translation: '' }];
+      items = [...items, { seq: d.seq, text: d.text, time: d.time, at: Date.now(), page: d.page, translation: '' }];
       render(false);
     });
     bus.on('translation', (d) => {
@@ -90,7 +104,7 @@ export default {
     });
 
     copy.addEventListener('click', () => {
-      const text = items.map((i) => `${formatTime(i.time)}\t${i.text}\t${i.translation ?? ''}`).join('\n');
+      const text = shown().map((i) => `${formatTime(i.time)}\t${i.text}\t${i.translation ?? ''}`).join('\n');
       navigator.clipboard.writeText(text);
     });
     clear.addEventListener('click', async () => {

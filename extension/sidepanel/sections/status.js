@@ -1,6 +1,7 @@
 export default {
   id: 'status',
   title: 'Status',
+  open: false,
   mount(root, { bus, el }) {
     const host = el('div', 'muted');
     const state = el('div', null, 'Waiting for the page…');

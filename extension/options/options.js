@@ -43,6 +43,11 @@
     showProviderFields();
   }
 
+  $('#resetOverlayY').addEventListener('click', async () => {
+    await chrome.storage.sync.remove('overlayY');
+    flash($('#saved'), 'Saved');
+  });
+
   for (const input of fields) {
     input.addEventListener('change', async () => {
       let value = readField(input);
@@ -55,7 +60,9 @@
         }
       }
       if (input.name === 'captureIntervalMs') value = Math.max(250, value);
+      // Picking a preset position drops the dragged one.
       await chrome.storage.sync.set({ [input.name]: value });
+      if (input.name === 'overlayPosition') await chrome.storage.sync.remove('overlayY');
       if (input.name === 'translator') showProviderFields();
       flash($('#saved'), 'Saved');
     });
@@ -64,6 +71,39 @@
   $('#prepareModel').addEventListener('click', async () => {
     const out = $('#deeplResult');
     const settings = await chrome.storage.sync.get(DEFAULTS);
+    if (settings.translator === 'nano') {
+      if (typeof LanguageModel === 'undefined') {
+        flash(out, 'Gemini Nano (Chrome Prompt API) not available in this browser – needs Chrome 138+.', true);
+        return;
+      }
+      const { target } = globalThis.HSR_langPair(settings);
+      const langs = ['en', 'es', 'ja'].includes(target) ? { expectedOutputs: [{ type: 'text', languages: [target] }] } : {};
+      try {
+        out.textContent = 'Checking…';
+        const availability = await LanguageModel.availability(langs);
+        if (availability === 'unavailable') {
+          flash(out, 'Gemini Nano is not supported on this device (needs a capable GPU or 16 GB RAM, ~22 GB free disk).', true);
+          return;
+        }
+        // Runs here because downloading the model requires a user gesture.
+        const s = await LanguageModel.create({
+          ...langs,
+          monitor(m) {
+            m.addEventListener('downloadprogress', (e) => {
+              out.textContent = `Downloading Gemini Nano: ${Math.round(e.loaded * 100)}%`;
+            });
+          },
+        });
+        s.destroy();
+        out.textContent = 'Model ready – testing…';
+        const res = await chrome.runtime.sendMessage({ type: 'TRANSLATE', text: '你这是在用命给我争取时间吗' }).catch((e) => ({ error: e.message }));
+        if (res?.error) flash(out, res.error, true);
+        else flash(out, `Ready: “${res?.translation}”`);
+      } catch (e) {
+        flash(out, `Gemini Nano: ${e.message}`, true);
+      }
+      return;
+    }
     if (settings.translator === 'chrome') {
       if (typeof Translator === 'undefined') {
         flash(out, 'Chrome built-in Translator API not available in this browser.', true);
