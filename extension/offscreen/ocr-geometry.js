@@ -1,5 +1,41 @@
 const CENTER_TOLERANCE = 0.15;
 
+/** A faint second row may be absent from the strong mask in bilingual subtitles. */
+export function recoverFaintRows(lines, faintLines, width) {
+  const recovered = faintLines.filter((candidate) => {
+    const height = candidate.y1 - candidate.y0;
+    const span = candidate.x1 - candidate.x0;
+    if (Math.abs((candidate.x0 + candidate.x1) / 2 - width / 2) > width * 0.1
+      || span < height * 2 || span > width * 0.8) return false;
+    if (lines.some((line) => candidate.y0 < line.y1 && candidate.y1 > line.y0)) return false;
+    return lines.some((line) => {
+      const referenceHeight = line.y1 - line.y0;
+      const gap = candidate.y0 - line.y1;
+      return gap >= 0 && gap <= referenceHeight * 2
+        && height >= referenceHeight * 0.85 && height <= referenceHeight * 1.6;
+    });
+  });
+  return [...lines, ...recovered].sort((a, b) => a.y0 - b.y0);
+}
+
+/** Recover faint neighbouring strokes without accepting new lines from a weaker mask. */
+export function expandLineBounds(lines, faintLines) {
+  return lines.map((line) => {
+    const height = line.y1 - line.y0;
+    const candidate = faintLines.find((faint) => {
+      const overlapY = Math.min(line.y1, faint.y1) - Math.max(line.y0, faint.y0);
+      return overlapY >= height * 0.6
+        && faint.x0 <= line.x0 && faint.x1 >= line.x1
+        && faint.y1 - faint.y0 <= height * 1.6
+        && faint.x1 - faint.x0 <= line.x1 - line.x0 + height * 8;
+    });
+    return candidate ? {
+      x0: Math.min(line.x0, candidate.x0), y0: Math.min(line.y0, candidate.y0),
+      x1: Math.max(line.x1, candidate.x1), y1: Math.max(line.y1, candidate.y1),
+    } : line;
+  });
+}
+
 // Drops connected components that can't be subtitle strokes: specks, blobs touching the band edge, oversized shapes.
 export function removeNoise(mask, w, h) {
   const seen = new Uint8Array(mask.length);

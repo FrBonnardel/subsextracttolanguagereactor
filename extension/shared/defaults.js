@@ -11,7 +11,7 @@ globalThis.HSR_DEFAULTS = Object.freeze({
   ollamaUrl: 'http://localhost:11434',
   ollamaModel: 'qwen2.5:7b',
   storyContext: false, // LLM translators: use the tab title/description + a Wikipedia synopsis as background
-  nanoKeepalive: true, // Gemini Nano: tiny prompt every ~2 s of idle playback so the GPU stays clocked up between lines
+  nanoKeepalive: true, // Gemini Nano: tiny prompt every ~1 s of idle playback to reduce GPU idle gaps
 
   subtitleSource: 'auto', // 'auto' (native text if found, else OCR) | 'native' | 'ocr'
   subtitleSelector: '', // optional CSS selector for player-rendered subtitle text

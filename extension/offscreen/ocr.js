@@ -2,7 +2,7 @@
 import { correctLine, flattenSymbols } from './ocr-correct.js';
 import { toGray, textMap, renderForOcr, geometryMask } from './preprocess.js';
 import { PaddleRecognizer } from './paddle-rec.js';
-import { removeNoise, findLines } from './ocr-geometry.js';
+import { removeNoise, findLines, expandLineBounds, recoverFaintRows } from './ocr-geometry.js';
 
 const VENDOR = chrome.runtime.getURL('vendor/');
 const USER_WORDS_PATH = '/hsr.user-words';
@@ -114,19 +114,37 @@ export class OcrEngine {
     const img = this.ctx.getImageData(0, 0, w, h);
     const enhanced = opts.ocrPreprocess !== 'binary';
     let mask;
+    let faintMask;
+    let recoveryMask;
     if (enhanced) {
       const strokeRadius = Math.min(10, Math.max(2, Math.round(h / 20)));
       const map = textMap(toGray(img.data, opts.subtitleColor), w, h, strokeRadius, opts.ocrEdgeBoost, opts.subtitleColor);
       mask = geometryMask(map);
+      faintMask = Uint8Array.from(map, (value) => value > 40 ? 1 : 0);
+      recoveryMask = Uint8Array.from(map, (value) => value > 15 ? 1 : 0);
       renderForOcr(map, w, h, img.data);
     } else {
       mask = makeMask(img.data, opts.textThreshold, opts.subtitleColor);
     }
     removeNoise(mask, w, h);
+    let lines = findLines(mask, w, h, opts.ocrCenteredOnly);
+    if (faintMask) {
+      removeNoise(faintMask, w, h);
+      lines = expandLineBounds(lines, findLines(faintMask, w, h, opts.ocrCenteredOnly));
+      removeNoise(recoveryMask, w, h);
+      const recovered = recoverFaintRows(lines, findLines(recoveryMask, w, h, true), w);
+      for (const line of recovered) {
+        if (lines.includes(line)) continue;
+        // Include recovered text in change detection, not the weak mask's background noise.
+        for (let y = line.y0; y < line.y1; y++) {
+          for (let x = line.x0; x < line.x1; x++) mask[y * w + x] |= recoveryMask[y * w + x];
+        }
+      }
+      lines = recovered;
+    }
     let inkCount = 0;
     for (let i = 0; i < mask.length; i++) inkCount += mask[i];
     const ink = inkCount / mask.length;
-    const lines = findLines(mask, w, h, opts.ocrCenteredOnly);
 
     // OCR source image: soft grayscale (enhanced) or the legacy black-on-white mask.
     if (!enhanced) {

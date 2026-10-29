@@ -54,6 +54,8 @@ test('Gemini Nano answering in Chinese is retried once, then falls back to Chrom
 });
 test('keep-alive pings Gemini Nano only after it has been idle, generating a single token', async (t) => {
   const pings = [];
+  let cancelled = 0;
+  let destroyed = 0;
   const realCreate = LanguageModel.create;
   LanguageModel.create = async (opts) => {
     const base = await realCreate(opts);
@@ -62,11 +64,10 @@ test('keep-alive pings Gemini Nano only after it has been idle, generating a sin
       clone: async () => ({
         promptStreaming: (p) => {
           pings.push(p);
-          let cancelled = false;
-          return { getReader: () => ({ read: async () => ({ value: 'O', done: false }), cancel: async () => { cancelled = true; } }) };
+          return { getReader: () => ({ read: async () => ({ value: 'O', done: false }), cancel: async () => { cancelled++; } }) };
         },
         prompt: async (p) => { prompts.push(p); return answers.shift(); },
-        destroy() {},
+        destroy() { destroyed++; },
       }),
     };
   };
@@ -74,9 +75,15 @@ test('keep-alive pings Gemini Nano only after it has been idle, generating a sin
 
   answers = ['Fine.'];
   await translateLocal({ provider: 'nano', text: '我还好', from: 'zh', to: 'es', context: [], story: '' });
+  destroyed = 0;
+  assert.equal(NANO_KEEPALIVE_IDLE_MS, 250);
   assert.deepEqual(await keepaliveNano({ to: 'es' }), { ok: true, skipped: true }); // just used
   await new Promise((r) => setTimeout(r, NANO_KEEPALIVE_IDLE_MS + 50));
   assert.deepEqual(await keepaliveNano({ to: 'es' }), { ok: true });
+  assert.equal(pings.length, 1);
+  assert.equal(cancelled, 1);
+  assert.equal(destroyed, 1);
+  assert.deepEqual(await keepaliveNano({ to: 'es' }), { ok: true, skipped: true });
   assert.equal(pings.length, 1);
 });
 test('Gemini Nano turning a statement into a question is asked once more to keep it a statement', async () => {

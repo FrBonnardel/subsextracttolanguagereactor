@@ -30,7 +30,7 @@
       </div>
       <div data-provider="nano">
         <label class="check"><input type="checkbox" name="nanoKeepalive"> Keep the GPU ready during playback</label>
-        <p class="hint">Runs a tiny Gemini Nano prompt when it has been idle for ~2 s while a video plays, so the GPU does not ramp down between subtitles. Uses some extra GPU power; stops when the video is paused or the tab is hidden.</p>
+        <p class="hint">Checks every 1 s and runs a tiny Gemini Nano prompt after at least 0.25 s idle to reduce GPU idle gaps between subtitles. Uses extra GPU power and may increase heat; cannot guarantee steady fan speed. Real translations interrupt it. Stops when the video is paused or the tab is hidden.</p>
       </div>
       <div data-provider="deepl">
       <label>API key

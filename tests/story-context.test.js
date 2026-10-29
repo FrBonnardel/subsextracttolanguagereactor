@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { titleCandidates, titlesMatch, pickWikiPage, wikipediaSynopsis, storyContext, formatStory } from '../extension/background/story-context.js';
+import { titleCandidates, titlesMatch, pickWikiPage, wikipediaSynopsis, storyContext, formatStory, usefulDescription } from '../extension/background/story-context.js';
 
 test('titleCandidates strips site names, tags and episode numbers', () => {
   assert.deepEqual(titleCandidates('全职法师第7季-02-免费在线观看-爱壹帆'), ['全职法师']);
@@ -9,6 +9,9 @@ test('titleCandidates strips site names, tags and episode numbers', () => {
   assert.deepEqual(titleCandidates('斗罗大陆 第2季 第35话_哔哩哔哩_bilibili')[0], '斗罗大陆');
   assert.equal(titleCandidates('电视剧《琅琊榜》EP05 官方高清')[0], '琅琊榜');
   assert.equal(titleCandidates('The Untamed EP 12 | WeTV')[0], 'The Untamed');
+  assert.equal(titleCandidates('[The Best Day of My Life] EP01 | Classmate to Contract Boyfriend | Zhang Jiongmin/Jiang Zhinan|YOUKU - YouTube')[0], 'The Best Day of My Life');
+  assert.equal(titleCandidates('[ENG SUB] 【4K】 [The Untamed] EP01 | YOUKU - YouTube')[0], 'The Untamed');
+  assert.equal(titleCandidates('【流星花园】第12集 - YouTube')[0], '流星花园');
 });
 
 test('titlesMatch accepts the same work and rejects unrelated hits', () => {
@@ -73,8 +76,8 @@ test('storyContext combines page details with the synopsis and caches per page',
   const data = {};
   const store = { get: async (k) => ({ [k]: data[k] }), set: async (v) => Object.assign(data, v) };
   const { impl, urls } = fakeFetch([
-    ['generator=search', { query: { pages: [{ index: 1, title: '琅琊榜' }] } }],
-    ['page/summary/', { title: '琅琊榜', extract: '架空历史剧。' }],
+    ['generator=search', { query: { pages: [{ index: 1, title: '琅琊榜', description: '中国电视剧' }] } }],
+    ['page/summary/', { title: '琅琊榜', description: '中国电视剧', extract: '架空历史剧。' }],
   ]);
   const info = { page: 'https://v.example/1', title: '琅琊榜 第1集', description: '梅长苏 回京\n\n复仇 https://x.y/z' };
   const first = await storyContext(info, impl, store);
@@ -87,4 +90,36 @@ test('storyContext combines page details with the synopsis and caches per page',
   const second = await storyContext(info, impl, store);
   assert.equal(second.cached, true);
   assert.equal(urls.length, 2);
+});
+
+test('episode titles reject the unrelated Italian film even when its title is identical', async () => {
+  const { impl, urls } = fakeFetch([
+    ['generator=search', { query: { pages: [
+      { index: 1, title: 'The Best Day of My Life', description: '2002 Italian drama film' },
+    ] } }],
+    ['page/summary/', { title: 'The Best Day of My Life', extract: 'A 2002 Italian drama film.' }],
+  ]);
+  const store = { get: async () => ({}), set: async () => {} };
+  const res = await storyContext({
+    page: 'youtube-test', title: '[The Best Day of My Life] EP01 | YOUKU - YouTube',
+    description: 'Joining channel members NOW\nClick to download the app\n\nPlot: Two former classmates become colleagues.\nStarring: Actor A / Actor B',
+  }, impl, store);
+  assert.equal(res.wikiTitle, '');
+  assert.doesNotMatch(res.story, /Italian|Joining|download/);
+  assert.match(res.story, /former classmates/);
+  assert.match(res.story, /Starring/);
+  assert.ok(urls.every((url) => !url.includes('page/summary/')));
+});
+
+test('description filtering keeps plot and cast after promotions, but not other show recommendations', () => {
+  const result = usefulDescription(`Joining channel members NOW
+https://example.com Click the link
+#Drama
+
+Plot: A planner meets her former classmate.
+Starring: Actor A / Actor B
+Hit Dramas on YOUKU English
+[Unrelated show]
+`);
+  assert.equal(result, 'Plot: A planner meets her former classmate. Starring: Actor A / Actor B');
 });

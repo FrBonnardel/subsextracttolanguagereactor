@@ -2,7 +2,67 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { inflateSync } from 'node:zlib';
 import test from 'node:test';
-import { findLines, removeNoise } from '../extension/offscreen/ocr-geometry.js';
+import { findLines, removeNoise, expandLineBounds, recoverFaintRows } from '../extension/offscreen/ocr-geometry.js';
+import { geometryMask } from '../extension/offscreen/preprocess.js';
+
+test('recovers the entirely missing Chinese row in the supplied time-question frame', () => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/subtitle-missing-row.json', import.meta.url), 'utf8'));
+  const { width: w, height: h } = fixture;
+  const map = inflateSync(Buffer.from(fixture.map, 'base64'));
+  const masks = [geometryMask(map), Uint8Array.from(map, (v) => v > 40 ? 1 : 0), Uint8Array.from(map, (v) => v > 15 ? 1 : 0)];
+  for (const mask of masks) removeNoise(mask, w, h);
+  const strong = findLines(masks[0], w, h, true);
+  assert.equal(strong.length, 1);
+  const expanded = expandLineBounds(strong, findLines(masks[1], w, h, true));
+  const lines = recoverFaintRows(expanded, findLines(masks[2], w, h, true), w);
+  assert.equal(lines.length, 2);
+  assert.ok(lines[1].x0 <= 590 && lines[1].x1 >= 690);
+  assert.ok(lines[1].y0 <= 63 && lines[1].y1 >= 93);
+});
+
+test('faint-row recovery requires an existing nearby subtitle and rejects small background blobs', () => {
+  const reference = { x0: 400, x1: 880, y0: 15, y1: 43 };
+  const noise = [
+    { x0: 630, x1: 690, y0: 100, y1: 118 },
+    { x0: 600, x1: 680, y0: 130, y1: 160 },
+    { x0: 50, x1: 150, y0: 60, y1: 90 },
+  ];
+  assert.deepEqual(recoverFaintRows([reference], noise, 1280), [reference]);
+  assert.deepEqual(recoverFaintRows([], noise, 1280), []);
+});
+
+test('supplied bilingual frame retains the full faint Chinese line instead of only its middle glyphs', () => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/subtitle-faint-strokes.json', import.meta.url), 'utf8'));
+  const { width: w, height: h } = fixture;
+  const map = inflateSync(Buffer.from(fixture.map, 'base64'));
+  assert.equal(map.length, w * h);
+  const strong = geometryMask(map);
+  const faint = Uint8Array.from(map, (value) => value > 40 ? 1 : 0);
+  removeNoise(strong, w, h);
+  removeNoise(faint, w, h);
+  const original = findLines(strong, w, h, true);
+  assert.equal(original.length, 2);
+  assert.ok(original[1].x0 > 600);
+  const lines = expandLineBounds(original, findLines(faint, w, h, true));
+  assert.equal(lines.length, 2);
+  const chinese = lines[1];
+  assert.ok(chinese.x0 <= 538 && chinese.x1 >= 743, JSON.stringify(chinese));
+  assert.ok(chinese.y0 <= 63 && chinese.y1 >= 92, JSON.stringify(chinese));
+  assert.ok(chinese.x1 - chinese.x0 < 300);
+  assert.ok(lines[0].y1 < chinese.y0);
+  const weak = Uint8Array.from(map, (value) => value > 15 ? 1 : 0);
+  removeNoise(weak, w, h);
+  assert.equal(recoverFaintRows(lines, findLines(weak, w, h, true), w).length, 2);
+});
+
+test('faint bounds cannot introduce new lines or expand a subtitle into a large background region', () => {
+  const line = { x0: 100, y0: 30, x1: 200, y1: 50 };
+  assert.deepEqual(expandLineBounds([line], [
+    { x0: 0, y0: 0, x1: 500, y1: 100 },
+    { x0: 100, y0: 70, x1: 200, y1: 90 },
+  ]), [line]);
+  assert.deepEqual(expandLineBounds([], [line]), []);
+});
 
 function rectangle(mask, w, x0, y0, x1, y1) {
   for (let y = y0; y < y1; y++) mask.fill(1, y * w + x0, y * w + x1);

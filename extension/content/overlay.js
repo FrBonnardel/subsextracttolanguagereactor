@@ -79,7 +79,8 @@
   }
 
   HSR.Overlay = class Overlay {
-    constructor({ onCardToggle, onWordOpen }) {
+    constructor({ onCardToggle, onWordOpen, onSubtitleDisplay }) {
+      this.onSubtitleDisplay = onSubtitleDisplay;
       this.onCardToggle = onCardToggle;
       this.onWordOpen = onWordOpen;
       this.settings = { ...globalThis.HSR_DEFAULTS };
@@ -270,17 +271,57 @@
 
     // ---- content -----------------------------------------------------------
 
-    showRaw(text) {
-      this.closeCard();
-      this.lineText = text;
-      this.tokens = [];
-      this.zh.replaceChildren(document.createTextNode(text));
-      this.tr.textContent = '';
-      this.tr.classList.remove('error');
-      this._updateEmpty();
+    identifySubtitle(text, { seq, replaces, at, translation, tokens, timing }) {
+      const previous = this.dialogue?.find((item) => item.seq === replaces);
+      this.dialogue = (this.dialogue ?? []).filter((item) => item.seq !== replaces
+        && at - item.at < 1000 && at >= item.at);
+      this.dialogue.push({ text, seq, at: previous?.at ?? at, translation, tokens, timing });
     }
 
-    renderTokens(tokens) {
+    hasSubtitle(seq) {
+      return this.shownDialogue?.some((item) => item.seq === seq && this.dialogue?.includes(item)) ?? false;
+    }
+
+    rememberTranslation(seq, translation) {
+      const item = this.dialogue?.find((line) => line.seq === seq);
+      if (item) item.translation = translation;
+    }
+
+    showRaw(text, seq) {
+      this.closeCard();
+      this.lineText = text;
+      this.shownDialogue = seq == null ? [{ text }] : (this.dialogue ?? []).filter((item) => item.seq <= seq);
+      this._renderDialogue();
+      this._updateEmpty();
+      for (const item of this.shownDialogue) {
+        if (item.timing && item.timing.textDisplayedAt == null) this.onSubtitleDisplay?.(item, 'text');
+        if (item.timing && item.translation && item.timing.translationDisplayedAt == null) this.onSubtitleDisplay?.(item, 'translation');
+      }
+      HSR_log('info', `content ${location.hostname}`, `Displayed subtitle: "${this.shownDialogue.map((item) => item.text).join(' - ')}"`);
+      if (this.shownDialogue.some((item) => item.translation)) {
+        HSR_log('info', `content ${location.hostname}`, `Displayed translation: "${this.shownDialogue.map((item) => item.text).join(' - ')}" → "${this.tr.textContent}"`);
+      }
+    }
+
+    renderTokens(tokens, seq) {
+      const item = seq == null ? this.shownDialogue?.at(-1) : this.dialogue?.find((line) => line.seq === seq);
+      if (!item) return;
+      item.tokens = tokens;
+      if (this.shownDialogue?.includes(item)) this._renderDialogue();
+    }
+
+    _renderDialogue() {
+      const items = this.shownDialogue ?? [];
+      const tokens = items.flatMap((item, index) => [
+        ...(index ? [{ text: ' - ', hanzi: false }] : []),
+        ...(item.tokens ?? [{ text: item.text, hanzi: false }]),
+      ]);
+      this._renderTokens(tokens);
+      this.tr.textContent = items.map((item) => item.translation).filter(Boolean).join(' - ');
+      this.tr.classList.toggle('error', items.some((item) => item.error));
+    }
+
+    _renderTokens(tokens) {
       this.tokens = tokens;
       const frag = document.createDocumentFragment();
       tokens.forEach((t, i) => {
@@ -299,10 +340,16 @@
     }
 
     /** @param {string} forLine  the Chinese line this translation belongs to; ignored unless it is on screen */
-    setTranslation(text, isError = false, forLine = this.lineText) {
-      if (forLine !== this.lineText) return;
-      this.tr.textContent = text;
-      this.tr.classList.toggle('error', isError);
+    setTranslation(text, isError = false, forLine = this.lineText, seq) {
+      const item = seq == null ? this.shownDialogue?.findLast((line) => line.text === forLine)
+        : this.dialogue?.find((line) => line.seq === seq && line.text === forLine);
+      if (!item) return;
+      item.translation = text;
+      item.error = isError;
+      if (!this.shownDialogue?.includes(item)) return;
+      this._renderDialogue();
+      if (item.timing) this.onSubtitleDisplay?.(item, 'translation');
+      HSR_log('info', `content ${location.hostname}`, `Displayed ${isError ? 'translation error' : 'translation'}: "${this.shownDialogue.map((line) => line.text).join(' - ')}" → "${this.tr.textContent}"`);
     }
 
     setStatus(text) {
@@ -311,12 +358,16 @@
     }
 
     clear() {
+      const hadText = !!this.lineText;
       this.closeCard();
       this.lineText = '';
       this.tokens = [];
+      this.dialogue = [];
+      this.shownDialogue = [];
       this.zh.replaceChildren();
       this.tr.textContent = '';
       this._updateEmpty();
+      if (hadText) HSR_log('info', `content ${location.hostname}`, 'Displayed subtitle cleared');
     }
 
     _updateEmpty() {

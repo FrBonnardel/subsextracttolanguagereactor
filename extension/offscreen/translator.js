@@ -162,7 +162,7 @@ export const isChineseQuestion = (text) => QUESTION.test(text);
 
 // Keep-alive: while a video plays, a tiny prompt runs when the model has been idle for a while, so the GPU
 // stays clocked up between subtitles instead of ramping up for every line. Real translations abort it.
-export const NANO_KEEPALIVE_IDLE_MS = 1500;
+export const NANO_KEEPALIVE_IDLE_MS = 250;
 let nanoLastUse = 0;
 let nanoActive = 0;
 let keepalive = null; // AbortController of the running ping

@@ -5,5 +5,6 @@ import frame from './frame.js';
 import line from './line.js';
 import explorer from './explorer.js';
 import history from './history.js';
+import story from './story.js';
 
-export default [history, explorer, line, status, frame];
+export default [history, explorer, line, status, frame, story];

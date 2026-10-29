@@ -2,9 +2,9 @@
 // Only short summaries are used, never scripts or transcripts.
 
 const MAX_TITLE = 200;
-const MAX_DESCRIPTION = 600;
+const MAX_DESCRIPTION = 1800;
 const MAX_SYNOPSIS = 900;
-const CACHE_PREFIX = 'story:';
+const CACHE_PREFIX = 'story:v3:';
 const WIKI_TIMEOUT_MS = 6000;
 const API_USER_AGENT = 'HanziSubsReactor/0.1 (Chrome extension; subtitle translation context)';
 
@@ -31,9 +31,14 @@ export function titleCandidates(...titles) {
   const out = [];
   for (const raw of titles) {
     const t = clean(raw, MAX_TITLE);
-    // 《...》 holds the actual work title; 【...】 / [...] / (...) usually hold tags ("中字", "4K", "官方").
+    // Square brackets can hold the show name on YouTube, not just release tags.
     const quoted = t.match(/《([^》]+)》/);
     if (quoted) out.push(quoted[1].trim());
+    for (const match of t.matchAll(/【([^】]*)】|\[([^\]]*)\]/g)) {
+      const name = (match[1] ?? match[2]).trim();
+      const meaningful = name.replace(EPISODE, '').replace(BOILERPLATE, '').replace(/[\s\d\p{P}\p{S}]/gu, '');
+      if (meaningful.length >= 2 && !SITE.test(name)) out.push(name);
+    }
     const segments = t
       .replace(/【[^】]*】|\[[^\]]*\]|\([^)]*\)|（[^）]*）|《|》/g, ' ')
       .split(SEPARATOR)
@@ -49,6 +54,23 @@ export function titleCandidates(...titles) {
 const norm = (s) => s.toLowerCase().replace(/[\s\p{P}\p{S}]/gu, '');
 const baseTitle = (s) => s.replace(/\s*[（(][^）)]*[）)]\s*$/, ''); // "流星花园 (2018年电视剧)" -> "流星花园"
 const SCREEN_WORK = /电视剧|電視劇|剧集|劇集|电影|電影|动画|動畫|动漫|動漫|网络剧|網絡劇|網路劇|综艺|綜藝|\b(tv|television|series|film|movie|anime|drama|donghua|miniseries)\b/i;
+const SERIES = /电视剧|電視劇|剧集|劇集|动漫|動漫|网络剧|網絡劇|\b(series|television|tv|anime|donghua|miniseries)\b/i;
+
+export function usefulDescription(text) {
+  const lines = String(text ?? '').split(/\r?\n/);
+  const kept = [];
+  for (const line of lines) {
+    if (/hit dramas|youtube youku family|follow our social media/i.test(line)) break;
+    if (/joining|members?\b|subscribe|download|click the link|favorite show|^\s*#/i.test(line)) continue;
+    const value = clean(line, MAX_DESCRIPTION);
+    if (value) kept.push(value);
+  }
+  return clean(kept.join('\n'), MAX_DESCRIPTION);
+}
+
+function isSeriesTitle(title) {
+  return new RegExp(EPISODE.source, 'i').test(title);
+}
 
 // A search hit only counts when its article title (minus the disambiguator) names exactly the searched work.
 export function titlesMatch(query, article) {
@@ -57,11 +79,12 @@ export function titlesMatch(query, article) {
 }
 
 /** Picks the best page from a MediaWiki generator=search result, or null. */
-export function pickWikiPage(query, pages) {
+export function pickWikiPage(query, pages, { series = false } = {}) {
   const candidates = [...(pages ?? [])]
     .sort((a, b) => a.index - b.index)
     .filter((p) => !p.pageprops || !('disambiguation' in p.pageprops))
-    .filter((p) => [p.title, ...Object.values(p.varianttitles ?? {})].some((t) => titlesMatch(query, t)));
+    .filter((p) => [p.title, ...Object.values(p.varianttitles ?? {})].some((t) => titlesMatch(query, t)))
+    .filter((p) => !series || SERIES.test(`${p.title} ${p.description ?? ''}`));
   return candidates.find((p) => SCREEN_WORK.test(`${p.title} ${p.description ?? ''}`)) ?? candidates[0] ?? null;
 }
 
@@ -82,15 +105,15 @@ async function getJson(fetchImpl, url, headers = {}) {
  * Looks up a short Wikipedia summary for one of the candidate titles.
  * @returns {Promise<object|null|undefined>} null when nothing matches, undefined when Wikipedia could not be reached
  */
-export async function wikipediaSynopsis(candidates, fetchImpl = fetch) {
+export async function wikipediaSynopsis(candidates, fetchImpl = fetch, hints = {}) {
   try {
-    return await lookup(candidates, fetchImpl);
+    return await lookup(candidates, fetchImpl, hints);
   } catch {
     return undefined;
   }
 }
 
-async function lookup(candidates, fetchImpl) {
+async function lookup(candidates, fetchImpl, hints) {
   for (const query of candidates) {
     const lang = CJK.test(query) ? 'zh' : 'en';
     const base = `https://${lang}.wikipedia.org`;
@@ -99,7 +122,7 @@ async function lookup(candidates, fetchImpl) {
       `${base}/w/api.php?action=query&format=json&formatversion=2&origin=*&generator=search&gsrlimit=8`
         + `&prop=info|description|pageprops&inprop=varianttitles&ppprop=disambiguation&gsrsearch=${encodeURIComponent(query)}`,
     );
-    const page = pickWikiPage(query, search?.query?.pages);
+    const page = pickWikiPage(query, search?.query?.pages, hints);
     if (!page) continue;
     const summary = await getJson(
       fetchImpl,
@@ -107,6 +130,7 @@ async function lookup(candidates, fetchImpl) {
       lang === 'zh' ? { 'Accept-Language': 'zh-cn' } : {},
     );
     if (!summary?.extract || summary.type === 'disambiguation') continue;
+    if (hints.series && !SERIES.test(`${summary.title ?? ''} ${summary.description ?? ''} ${summary.extract}`)) continue;
     return {
       title: summary.title ?? page.title,
       synopsis: clean(summary.extract, MAX_SYNOPSIS),
@@ -130,12 +154,14 @@ export function formatStory({ title, description, wiki }) {
  */
 export async function storyContext(info, fetchImpl = fetch, store = chrome.storage.session) {
   const title = clean(info.title || info.altTitle, MAX_TITLE);
-  const description = clean(info.description, MAX_DESCRIPTION);
-  const key = `${CACHE_PREFIX}${info.page}\u0000${title}`;
+  const description = usefulDescription(info.description);
+  const key = `${CACHE_PREFIX}${info.page}\u0000${title}\u0000${storyTag(description)}`;
   const hit = (await store.get(key))[key];
   if (hit) return { ...hit, cached: true, complete: true };
 
-  const wiki = await wikipediaSynopsis(titleCandidates(info.title, info.altTitle), fetchImpl);
+  const wiki = await wikipediaSynopsis(titleCandidates(info.title, info.altTitle), fetchImpl, {
+    series: isSeriesTitle(`${info.title ?? ''} ${info.altTitle ?? ''}`),
+  });
   const result = { story: formatStory({ title, description, wiki }), wikiTitle: wiki?.title ?? '' };
   if (wiki !== undefined) await store.set({ [key]: result });
   return { ...result, cached: false, complete: wiki !== undefined };

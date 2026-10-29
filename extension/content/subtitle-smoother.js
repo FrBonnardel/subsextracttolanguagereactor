@@ -2,6 +2,14 @@
   const HSR = (globalThis.HSR ??= {});
   const SAME_LINE = 0.8;
   const UPGRADE_MARGIN = 0.1;
+  const normalize = (text) => text.replace(/[\s\p{P}]/gu, '');
+
+  function isFragment(text, full) {
+    if (!full) return false;
+    const part = normalize(text);
+    const whole = normalize(full);
+    return part.length > 0 && part.length < whole.length && whole.includes(part);
+  }
 
   function levenshtein(a, b) {
     const s = Array.from(a);
@@ -52,7 +60,7 @@
      * @param {number} [time] video time of the frame this read came from
      * @param {number} [quality] 0..1 read quality (dictionary coverage × confidence); best variant wins
      */
-    push(text, confidence = 0, time = null, quality = confidence / 100) {
+    push(text, confidence = 0, time = null, quality = confidence / 100, timing = null) {
       if (!text) {
         this.candidate = null;
         if (this.current && ++this.empty >= this.clearAfter) {
@@ -62,31 +70,35 @@
         return;
       }
       this.empty = 0;
+      if (isFragment(text, this.current)) {
+        this.candidate = null;
+        return;
+      }
       if (this.current && HSR.similarity(text, this.current) >= SAME_LINE) {
         // Same line; only a clearly better read of it is worth re-emitting (fixes an early misread).
-        if (quality > this.currentQuality + UPGRADE_MARGIN) this._emit(text, time, quality);
+        if (quality > this.currentQuality + UPGRADE_MARGIN) this._emit(text, time, quality, timing);
         return;
       }
 
       const c = this.candidate;
       if (c && HSR.similarity(text, c.text) >= SAME_LINE) {
         c.count++;
-        if (quality > c.quality) Object.assign(c, { text, confidence, quality });
+        if (quality > c.quality && !isFragment(text, c.text)) Object.assign(c, { text, confidence, quality, timing });
       } else {
-        this.candidate = { text, confidence, count: 1, time, quality };
+        this.candidate = { text, confidence, count: 1, time, quality, timing };
       }
 
       if (this.candidate.count >= this.stableFrames) {
-        const { text: line, time: firstSeen, quality: q } = this.candidate;
+        const { text: line, time: firstSeen, quality: q, timing: captured } = this.candidate;
         this.candidate = null;
-        this._emit(line, firstSeen, q);
+        this._emit(line, firstSeen, q, captured);
       }
     }
 
-    _emit(text, time, quality) {
+    _emit(text, time, quality, timing) {
       this.current = text;
       this.currentQuality = quality;
-      this.onLine(text, time, quality);
+      this.onLine(text, time, quality, timing);
     }
 
     /** Accept a line shown from another source (replay cache, a kept better read) as current, without emitting it. */
@@ -98,7 +110,7 @@
     }
 
     /** Apply a single trusted read immediately (e.g. the frame the user paused on), skipping debounce. */
-    force(text, time = null, quality = 0.5) {
+    force(text, time = null, quality = 0.5, timing = null) {
       this.candidate = null;
       this.empty = 0;
       if (!text) {
@@ -108,8 +120,9 @@
         }
         return;
       }
+      if (isFragment(text, this.current)) return;
       if (this.current && HSR.similarity(text, this.current) >= SAME_LINE && quality <= this.currentQuality + UPGRADE_MARGIN) return;
-      this._emit(text, time, quality);
+      this._emit(text, time, quality, timing);
     }
   };
 })();
