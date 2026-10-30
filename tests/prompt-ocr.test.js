@@ -673,6 +673,42 @@ test('Python OCR route sends the original crop and returns text through the exis
   assert.equal(hybridResult.debug.decision, 'passed');
   assert.match(hybridResult.debug.finalCrop, /^data:image\/png/);
   assert.equal(visionCalls, 1, 'Reliable Paddle text must not invoke Chrome vision');
+  let paddleCalls = 0;
+  engine.paddle.recognize = async () => {
+    paddleCalls++;
+    return { text: paddleReading, confidence: 95, symbols: [] };
+  };
+  for (let index = 0; index < 3; index++) {
+    const repeated = await engine.process(hybridArgs);
+    assert.equal(repeated.unchanged, true);
+    assert.match(repeated.debug.decisionReason, /Paddle and vision skipped/);
+    assert.equal(repeated.debug.outputEngine, 'Paddle');
+  }
+  assert.equal(paddleCalls, 0, 'Three identical subtitle masks must bypass Paddle inference');
+  await engine.process(hybridArgs);
+  assert.equal(paddleCalls, 1, 'Periodic recognition must revalidate unchanged masks');
+  await engine.process({ ...hybridArgs, fresh: true });
+  assert.equal(paddleCalls, 2, 'Forced frames must revalidate recognition');
+  pixels[0] = 90;
+  await engine.process(hybridArgs);
+  assert.equal(paddleCalls, 2, 'Background changes outside subtitle rows must not trigger recognition');
+  const changedPixel = (50 * 1000 + 420) * 4;
+  const savedPixel = pixels.slice(changedPixel, changedPixel + 4);
+  pixels[changedPixel] = pixels[changedPixel + 1] = pixels[changedPixel + 2] = 0;
+  await engine.process(hybridArgs);
+  assert.equal(paddleCalls, 3, 'Even one changed subtitle stroke must trigger recognition');
+  pixels.set(savedPixel, changedPixel);
+  engine.paddle.recognize = async () => ({
+    text: `${paddleReading}，`, confidence: 60, symbols: [],
+  });
+  const weakerSameText = await engine.process({ ...hybridArgs, fresh: true });
+  assert.equal(weakerSameText.unchanged, true);
+  assert.equal(weakerSameText.debug.decision, 'passed');
+  assert.equal(weakerSameText.debug.outputEngine, 'Paddle');
+  assert.equal(visionCalls, 1, 'Punctuation and confidence changes must not invoke vision for accepted text');
+  engine.paddle.recognize = async () => ({ text: '我们今天再来。', confidence: 60, symbols: [] });
+  await engine.process({ ...hybridArgs, fresh: true });
+  assert.equal(visionCalls, 2, 'A substituted Hanzi must still reach vision when unreliable');
   engine.resetTab(1);
   engine.paddle.recognize = async () => ({ text: paddleReading, confidence: 60, symbols: [] });
   const fallbackResult = await engine.process(hybridArgs);
@@ -681,9 +717,9 @@ test('Python OCR route sends the original crop and returns text through the exis
   assert.match(fallbackResult.debug.decisionReason, /Paddle rejected/);
   assert.match(fallbackResult.debug.finalCrop, /^data:image\/png/);
   assert.equal(fallbackResult.pythonTranslation, 'See you tomorrow.');
-  assert.equal(visionCalls, 2, 'Low confidence must invoke vision');
+  assert.equal(visionCalls, 3, 'Low confidence must invoke vision');
   assert.equal((await engine.process(hybridArgs)).unchanged, true);
-  assert.equal(visionCalls, 2, 'Unchanged fallback subtitles must be reused');
+  assert.equal(visionCalls, 3, 'Unchanged fallback subtitles must be reused');
   engine.paddle.recognize = async (source) => {
     assert.equal(source, engine.srcCanvas, 'Python bridge must retain original pixels');
     return { text: paddleReading, confidence: 95, symbols: [] };

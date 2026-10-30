@@ -1,5 +1,48 @@
 const CENTER_TOLERANCE = 0.15;
 
+/** Isolate sustained text density from sparse artwork in an already detected row. */
+export function refineLineBounds(lines, mask, w, centeredOnly = false) {
+  return lines.map((line) => {
+    const height = line.y1 - line.y0;
+    const radius = Math.max(1, Math.round(height / 8));
+    const sums = new Int32Array(w + 1);
+    for (let x = 0; x < w; x++) {
+      let ink = 0;
+      for (let y = line.y0; y < line.y1; y++) ink += mask[y * w + x];
+      sums[x + 1] = sums[x] + ink;
+    }
+    const density = new Float32Array(w);
+    let peak = 0;
+    for (let x = line.x0; x < line.x1; x++) {
+      const left = Math.max(0, x - radius);
+      const right = Math.min(w, x + radius + 1);
+      density[x] = (sums[right] - sums[left]) / (right - left);
+      peak = Math.max(peak, density[x]);
+    }
+    const threshold = Math.max(1, height * 0.08, peak * 0.2);
+    const blocks = [];
+    const maxGap = Math.max(3, Math.round(height * 0.75));
+    for (let x = line.x0; x < line.x1; x++) {
+      if (density[x] < threshold) continue;
+      const last = blocks[blocks.length - 1];
+      if (last && x - last.x1 <= maxGap) last.x1 = x + 1;
+      else blocks.push({ x0: x, x1: x + 1 });
+    }
+    const candidates = blocks.filter((block) => block.x1 - block.x0 >= height * 0.35);
+    if (!candidates.length) return line;
+    const middle = centeredOnly ? w / 2 : (line.x0 + line.x1) / 2;
+    const distance = (block) => Math.max(block.x0 - middle, middle - block.x1, 0);
+    const selected = centeredOnly
+      ? candidates.reduce((best, block) => distance(block) < distance(best) ? block : best)
+      : { x0: candidates[0].x0, x1: candidates[candidates.length - 1].x1 };
+    const padding = Math.max(2, Math.round(height * 0.2));
+    return { ...line,
+      x0: Math.max(line.x0, selected.x0 - radius - padding),
+      x1: Math.min(line.x1, selected.x1 + radius + padding),
+    };
+  });
+}
+
 /** A faint second row may be absent from the strong mask in bilingual subtitles. */
 export function recoverFaintRows(lines, faintLines, width) {
   const recovered = faintLines.filter((candidate) => {

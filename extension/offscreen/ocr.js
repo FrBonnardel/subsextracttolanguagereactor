@@ -4,7 +4,7 @@ import { toGray, textMap, renderForOcr, geometryMask } from './preprocess.js';
 import { PaddleRecognizer } from './paddle-rec.js';
 import { NativeOcr } from './native-ocr.js';
 import { PromptOcr } from './prompt-ocr.js';
-import { removeNoise, findLines, expandLineBounds, recoverFaintRows } from './ocr-geometry.js';
+import { removeNoise, findLines, expandLineBounds, recoverFaintRows, refineLineBounds } from './ocr-geometry.js';
 
 const VENDOR = chrome.runtime.getURL('vendor/');
 const USER_WORDS_PATH = '/hsr.user-words';
@@ -14,8 +14,28 @@ const MIN_INK = 0.002;
 const MAX_INK = 0.4; // more bright pixels than this is background, not subtitles
 const TARGET_GLYPH_PX = 56; // Tesseract's LSTM is most accurate around 40–60 px text height
 const LINE_PAD = 20;
+const MAX_FRAME_REUSES = 3;
 
 const HAN_OR_PUNCT = /[\p{Script=Han}\u3000-\u303f\uff00-\uffef]/u;
+
+function subtitleFingerprint(mask, width, lines) {
+  const pixels = new Uint8Array(lines.reduce((sum, line) =>
+    sum + (line.x1 - line.x0) * (line.y1 - line.y0), 0));
+  let offset = 0;
+  for (const line of lines) {
+    for (let y = line.y0; y < line.y1; y++) {
+      const row = mask.subarray(y * width + line.x0, y * width + line.x1);
+      pixels.set(row, offset);
+      offset += row.length;
+    }
+  }
+  return { bounds: JSON.stringify(lines), pixels };
+}
+
+function identicalSubtitlePixels(a, b) {
+  return a?.bounds === b.bounds && a.pixels.length === b.pixels.length
+    && a.pixels.every((pixel, index) => pixel === b.pixels[index]);
+}
 
 export function needsVisionFallback(reading, pixels, width, box, minConfidence = 50) {
   if (!Number.isFinite(reading.confidence)
@@ -173,7 +193,11 @@ export class OcrEngine {
       const paddlePixels = chromeVision
         ? { data: new Uint8ClampedArray(sourcePixels.data), width: w, height: h }
         : sourcePixels;
-      const { lines, ink, mask } = subtitleGeometry(paddlePixels, w, h, opts, chromeVision, true);
+      const geometry = subtitleGeometry(paddlePixels, w, h, opts, chromeVision, !chromeVision);
+      const { ink, mask } = geometry;
+      const lines = chromeVision
+        ? refineLineBounds(geometry.lines, geometry.textMask, w, opts.ocrCenteredOnly)
+        : geometry.lines;
       if (chromeVision) {
         if (opts.ocrPreprocess === 'binary') {
           for (let i = 0; i < mask.length; i++) {
@@ -201,15 +225,24 @@ export class OcrEngine {
             size: `${w}x${h}, Python frame not sent: ${reason}` } : undefined,
         };
       }
+      const key = JSON.stringify([this._frameKey(opts), w, h, opts.cropTop, opts.cropBottom,
+        opts.subtitleColor, opts.textThreshold, opts.minConfidence, opts.translationContext?.story ?? '']);
+      const previous = this.pythonTabs.get(tabId);
+      const fingerprint = chromeVision ? subtitleFingerprint(geometry.textMask, w, lines) : null;
+      const reusePaddle = chromeVision && !fresh && previous?.key === key
+        && previous.frameReuses < MAX_FRAME_REUSES
+        && identicalSubtitlePixels(previous.fingerprint, fingerprint);
+      const frameReadings = [];
       const readings = [];
       const paddleScores = [];
       const selected = [];
       const paddleBoxes = [];
       const rows = lines.map((line, index) => {
         const height = line.y1 - line.y0;
-        const margin = Math.max(4, Math.round(height * 0.5));
+        const margin = Math.max(4, Math.round(height * (chromeVision ? 0.15 : 0.5)));
+        const horizontalMargin = Math.round(height * (chromeVision ? 0.25 : 2));
         const row = {
-          x0: Math.max(0, line.x0 - height * 2), x1: Math.min(w, line.x1 + height * 2),
+          x0: Math.max(0, line.x0 - horizontalMargin), x1: Math.min(w, line.x1 + horizontalMargin),
           y0: Math.max(0, line.y0 - margin, index ? lines[index - 1].y1 + 3 : 0),
           y1: Math.min(h, line.y1 + margin, index + 1 < lines.length ? lines[index + 1].y0 - 3 : h),
         };
@@ -228,8 +261,10 @@ export class OcrEngine {
       });
       for (const [index, row] of rows.entries()) {
         if (row.y1 <= row.y0) throw new Error('Subtitle rows overlap; cannot safely crop Chinese subtitles.');
-        const reading = await this.paddle.recognize(chromeVision ? this.maskCanvas : this.srcCanvas,
-          chromeVision ? lines[index] : row);
+        const reading = reusePaddle ? previous.frameReadings[index]
+          : await this.paddle.recognize(chromeVision ? this.maskCanvas : this.srcCanvas,
+            chromeVision ? lines[index] : row);
+        frameReadings.push(reading);
         readings.push(reading.text);
         paddleScores.push(reading.confidence);
         const chinese = /\p{Script=Han}/u.test(reading.text);
@@ -258,13 +293,11 @@ export class OcrEngine {
             ms: Math.round(performance.now() - start), ink,
             size: `${w}x${h}, Python frame not sent: no Chinese row detected` } : undefined };
       }
-      const identity = paddleText.replace(/[^\p{L}\p{N}!?！？]/gu, '');
-      const key = JSON.stringify([this._frameKey(opts), w, h, opts.cropTop, opts.cropBottom,
-        opts.subtitleColor, opts.textThreshold, opts.minConfidence, opts.translationContext?.story ?? '',
-        hybrid && fallback]);
-      const previous = this.pythonTabs.get(tabId);
+      const identity = paddleText.replace(chromeVision ? /[^\p{L}\p{N}]/gu : /[^\p{L}\p{N}!?！？]/gu, '');
       const shorterFragment = identity.length >= 2 && previous?.identity.includes(identity)
         && identity.length < previous.identity.length;
+      const reuseResult = identity && previous?.key === key
+        && (previous.identity === identity || shorterFragment);
       const left = Math.min(...selected.map((row) => row.x0));
       const right = Math.max(...selected.map((row) => row.x1));
       for (let index = 1; index < selected.length; index++) {
@@ -297,11 +330,12 @@ export class OcrEngine {
         }
         paddleInput = cleanedCrop.toDataURL('image/png');
       }
-      const decision = fallback ? 'fallback' : 'passed';
-      const decisionReason = fallback ? 'Paddle rejected: low confidence or weak contrast; Chrome vision fallback'
+      const decision = reuseResult ? previous.decision : fallback ? 'fallback' : 'passed';
+      const decisionReason = reuseResult ? previous.decisionReason
+        : fallback ? 'Paddle rejected: low confidence or weak contrast; Chrome vision fallback'
         : hybrid ? 'Paddle passed; text translation' : 'Chinese rows selected; vision OCR';
       if (debug) {
-        this.ctx.strokeStyle = fallback ? 'rgba(240,70,70,.9)' : 'rgba(0,200,100,.9)';
+        this.ctx.strokeStyle = decision === 'fallback' ? 'rgba(240,70,70,.9)' : 'rgba(0,200,100,.9)';
         for (const row of selected) this.ctx.strokeRect(left, row.y0, right - left, row.y1 - row.y0);
       }
       const frameDebug = debug ? {
@@ -312,8 +346,11 @@ export class OcrEngine {
         paddleConfidence: chineseReadings.every((reading) => Number.isFinite(reading.confidence))
           ? Math.min(...chineseReadings.map((reading) => reading.confidence)) : null,
       } : undefined;
-      if (identity && previous?.key === key && (previous.identity === identity || shorterFragment)) {
-        HSR_log('debug', 'ocr', `Paddle subtitle unchanged "${paddleText}"`);
+      if (reuseResult) {
+        previous.fingerprint = fingerprint;
+        previous.frameReadings = frameReadings;
+        previous.frameReuses = reusePaddle ? previous.frameReuses + 1 : 0;
+        HSR_log('debug', 'ocr', `${reusePaddle ? 'Subtitle pixels unchanged; Paddle skipped' : 'Paddle subtitle unchanged'} "${paddleText}"`);
         return {
           text: previous.text, raw: previous.raw, confidence: previous.confidence, quality: previous.quality,
           pythonTranslationReady: previous.pythonTranslationReady, unchanged: true,
@@ -321,7 +358,10 @@ export class OcrEngine {
           bundledTranslationProvider: chromeVision ? 'nano' : 'python',
           debug: debug ? { ...frameDebug, raw: previous.raw,
             outputText: previous.text, outputTranslation: previous.pythonTranslation,
-            outputEngine: hybrid && !fallback ? 'Paddle' : chromeVision ? 'Chrome vision' : 'Python',
+            decision: previous.decision,
+            decisionReason: `${previous.decisionReason}; ${reusePaddle
+              ? 'identical subtitle pixels; Paddle and vision skipped' : 'same subtitle text; result reused'}`,
+            outputEngine: previous.outputEngine,
             ms: Math.round(performance.now() - start), ink,
             size: `${w}x${h}, current Paddle crop; prior result reused, no new inference` } : undefined,
         };
@@ -356,11 +396,12 @@ export class OcrEngine {
       const pythonTranslationReady = !!text && typeof result.translation === 'string' && !!result.translation.trim();
       if (identity && text && (pythonTranslationReady || (hybrid && !fallback))) {
         this.pythonTabs.set(tabId, { key, identity, text, raw, confidence, quality, pythonTranslationReady,
-          pythonTranslation: result.translation });
+          pythonTranslation: result.translation, fingerprint, frameReadings, frameReuses: 0,
+          decision, decisionReason, outputEngine: hybrid && !fallback ? 'Paddle' : chromeVision ? 'Chrome vision' : 'Python' });
       } else {
         this.pythonTabs.delete(tabId);
       }
-      HSR_log('debug', 'ocr', `${chromeVision ? 'Chrome Prompt API' : 'Python'} ${result.singlePass ? 'single-pass whole-band VLM' : result.wholeBandOcr ? 'whole-band VLM' : 'OCR'}+translation · ${ms} ms: raw "${raw}" → "${text}"`);
+      HSR_log('debug', 'ocr', `${hybrid && !fallback ? 'Paddle text OCR' : chromeVision ? 'Chrome vision OCR+translation' : 'Python OCR+translation'} · ${ms} ms: raw "${raw}" → "${text}"`);
       return {
         text, raw, confidence, quality, pythonTranslationReady,
         ...(pythonTranslationReady && { pythonTranslation: result.translation }),
@@ -538,7 +579,10 @@ function subtitleGeometry(img, w, h, opts, render = false, mergeUncentered = fal
       if (lines.includes(line)) continue;
       // Include recovered text in change detection, not the weak mask's background noise.
       for (let y = line.y0; y < line.y1; y++) {
-        for (let x = line.x0; x < line.x1; x++) mask[y * w + x] |= recoveryMask[y * w + x];
+        for (let x = line.x0; x < line.x1; x++) {
+          mask[y * w + x] |= recoveryMask[y * w + x];
+          faintMask[y * w + x] |= recoveryMask[y * w + x];
+        }
       }
     }
     lines = recovered;
@@ -554,7 +598,7 @@ function subtitleGeometry(img, w, h, opts, render = false, mergeUncentered = fal
   }
   let inkCount = 0;
   for (let i = 0; i < mask.length; i++) inkCount += mask[i];
-  return { mask, lines, ink: inkCount / mask.length };
+  return { mask, textMask: faintMask ?? mask, lines, ink: inkCount / mask.length };
 }
 
 function cropBox(rect, dpr, opts, imgW, imgH) {

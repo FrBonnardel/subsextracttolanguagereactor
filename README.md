@@ -282,6 +282,22 @@ their detected bounds without added margins, stacked before model
 resizing. Rejected frames with no selected rows clear this preview.
 Chrome Paddle receives these tight row bounds; safety margins remain only on
 the original-color vision crop. Python bridge Paddle input is unchanged.
+Chrome's Paddle/vision paths refine each detected row using sustained horizontal
+stroke density, excluding sparse neighbouring artwork instead of widening to
+all text-like pixels on the row. Margins scale with detected row height and are
+kept small for the original-color vision crop. Off-centre mode retains separated
+text blocks; Python bridge cropping is unchanged.
+Following the detection-before-recognition and repeated-frame filtering approach
+used by [VSE](https://github.com/YaoFANGUK/video-subtitle-extractor), Chrome paths
+compare full-resolution subtitle-row masks before running Paddle. Identical
+rows reuse recognition for at most three consecutive captures; forced captures,
+changed strokes, changed geometry/settings and blank frames revalidate or clear
+the result. Moving backgrounds outside the detected rows do not invalidate it.
+Matching accepted text, including punctuation-only changes, reuses the prior
+result even if a subsequent Paddle confidence/contrast check drops, avoiding
+redundant vision calls. Changed Hanzi still use the normal fallback gate.
+Debug messages distinguish skipped Paddle inference from text-result reuse.
+This is a browser-native adaptation, not VSE's Python detector or VideoSubFinder.
 Optional outline enhancement adds at most 10% to the stroke map; a dark shadow
 is not required and unoutlined strokes are never penalized by that boost.
 Python bridge mode does not show a cleaned

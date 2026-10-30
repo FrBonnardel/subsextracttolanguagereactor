@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { inflateSync } from 'node:zlib';
 import test from 'node:test';
-import { findLines, removeNoise, expandLineBounds, recoverFaintRows } from '../extension/offscreen/ocr-geometry.js';
+import { findLines, removeNoise, expandLineBounds, recoverFaintRows, refineLineBounds } from '../extension/offscreen/ocr-geometry.js';
 import { geometryMask } from '../extension/offscreen/preprocess.js';
 
 test('recovers the entirely missing Chinese row in the supplied time-question frame', () => {
@@ -67,6 +67,73 @@ test('faint bounds cannot introduce new lines or expand a subtitle into a large 
 function rectangle(mask, w, x0, y0, x1, y1) {
   for (let y = y0; y < y1; y++) mask.fill(1, y * w + x0, y * w + x1);
 }
+
+test('refines the supplied reading subtitle without clothing and tableware artwork', () => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/subtitle-reading-artwork.json', import.meta.url), 'utf8'));
+  const mask = inflateSync(Buffer.from(fixture.mask, 'base64'));
+  assert.equal(mask.length, fixture.width * fixture.height);
+  const [line] = refineLineBounds(fixture.lines, mask, fixture.width, true);
+  assert.ok(line.x0 >= 275 && line.x0 <= 292, JSON.stringify(line));
+  assert.ok(line.x1 >= 428 && line.x1 <= 445, JSON.stringify(line));
+  assert.equal(line.y0, 30);
+  assert.equal(line.y1, 62);
+});
+
+test('density refinement retains short, spaced, faint and multiple subtitle rows', () => {
+  const w = 600;
+  const mask = new Uint8Array(w * 120);
+  const lines = [
+    { x0: 100, x1: 500, y0: 10, y1: 40 },
+    { x0: 200, x1: 400, y0: 65, y1: 95 },
+  ];
+  for (const x of [240, 260, 280, 300, 320, 340]) rectangle(mask, w, x, 15, x + 3, 35);
+  rectangle(mask, w, 294, 70, 306, 90);
+  rectangle(mask, w, 110, 20, 112, 23);
+  rectangle(mask, w, 485, 20, 487, 23);
+  const refined = refineLineBounds(lines, mask, w, true);
+  assert.equal(refined.length, 2);
+  assert.ok(refined[0].x0 <= 240 && refined[0].x0 >= 225);
+  assert.ok(refined[0].x1 >= 343 && refined[0].x1 <= 360);
+  assert.ok(refined[1].x0 <= 294 && refined[1].x1 >= 306);
+  assert.equal(refined[0].y1, 40);
+  assert.equal(refined[1].y0, 65);
+  assert.deepEqual(refineLineBounds(lines, new Uint8Array(mask.length), w, true), lines);
+});
+
+test('uncentered density refinement preserves multiple separated text blocks', () => {
+  const w = 400;
+  const mask = new Uint8Array(w * 80);
+  rectangle(mask, w, 30, 25, 70, 45);
+  rectangle(mask, w, 200, 25, 240, 45);
+  const [line] = refineLineBounds([{ x0: 10, y0: 20, x1: 260, y1: 50 }], mask, w, false);
+  assert.ok(line.x0 <= 30 && line.x1 >= 240);
+});
+
+test('density refinement retains the faint Chinese strokes in existing bilingual fixtures', () => {
+  for (const name of ['subtitle-faint-strokes', 'subtitle-missing-row']) {
+    const fixture = JSON.parse(readFileSync(new URL(`./fixtures/${name}.json`, import.meta.url), 'utf8'));
+    const { width: w, height: h } = fixture;
+    const map = inflateSync(Buffer.from(fixture.map, 'base64'));
+    const strong = geometryMask(map);
+    const faint = Uint8Array.from(map, (value) => value > 40 ? 1 : 0);
+    const weak = Uint8Array.from(map, (value) => value > 15 ? 1 : 0);
+    for (const mask of [strong, faint, weak]) removeNoise(mask, w, h);
+    const expanded = expandLineBounds(findLines(strong, w, h, true), findLines(faint, w, h, true));
+    const lines = recoverFaintRows(expanded, findLines(weak, w, h, true), w);
+    for (const line of lines) {
+      if (expanded.includes(line)) continue;
+      for (let y = line.y0; y < line.y1; y++) {
+        for (let x = line.x0; x < line.x1; x++) faint[y * w + x] |= weak[y * w + x];
+      }
+    }
+    const refined = refineLineBounds(lines, faint, w, true);
+    assert.equal(refined.length, 2);
+    const chinese = refined[1];
+    const left = name === 'subtitle-faint-strokes' ? 538 : 590;
+    const right = name === 'subtitle-faint-strokes' ? 743 : 690;
+    assert.ok(chinese.x0 <= left && chinese.x1 >= right, `${name}: ${JSON.stringify(chinese)}`);
+  }
+});
 
 test('isolates the supplied subtitle from sparse artwork above it', () => {
   const fixture = JSON.parse(readFileSync(new URL('./fixtures/subtitle-artwork-mask.json', import.meta.url), 'utf8'));
