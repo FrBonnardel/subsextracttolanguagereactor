@@ -35,7 +35,7 @@ test('overlay logs actual subtitle writes and clears, but not rejected translati
   assert.equal(logs[2][2], 'Displayed subtitle cleared');
 });
 
-test('fast dialogue groups Chinese and translations in a sliding one-second window', () => {
+test('fast dialogue groups distinct subtitles in a one-second window without duplicating repeated text', () => {
     const context = vm.createContext({
       location: { hostname: 'example.com' }, HSR_log() {},
       document: {
@@ -44,6 +44,42 @@ test('fast dialogue groups Chinese and translations in a sliding one-second wind
         createDocumentFragment: () => ({ append() {} }),
       },
     });
+
+    {
+      const context = vm.createContext({
+        location: { hostname: 'example.com' }, HSR_log() {},
+        document: {
+          createTextNode: (text) => text,
+          createElement: () => ({ append() {}, dataset: {} }),
+          createDocumentFragment: () => ({ append() {} }),
+        },
+      });
+      vm.runInContext(readFileSync(new URL('../extension/content/overlay.js', import.meta.url), 'utf8'), context);
+      const overlay = Object.create(context.HSR.Overlay.prototype);
+      Object.assign(overlay, {
+        zh: { replaceChildren() {} },
+        tr: { textContent: '', classList: { toggle() {} } },
+        closeCard() {}, _updateEmpty() {},
+      });
+      overlay.identifySubtitle('罗锅老奶奶的时候', { seq: 1, at: 0, translation: 'When Grandma was old' });
+      overlay.showRaw('罗锅老奶奶的时候', 1);
+      overlay.identifySubtitle('罗锅老奶奶的时候', { seq: 2, at: 400, translation: 'When Grandma was old' });
+      overlay.showRaw('罗锅老奶奶的时候', 2);
+      assert.equal(overlay.tokens.map((token) => token.text).join(''), '罗锅老奶奶的时候');
+      assert.equal(overlay.tr.textContent, 'When Grandma was old');
+      assert.equal(overlay.hasSubtitle(1), false);
+      overlay.setTranslation('Stale answer', false, '罗锅老奶奶的时候', 1);
+      assert.equal(overlay.tr.textContent, 'When Grandma was old');
+      overlay.identifySubtitle('罗锅老奶奶的时候，', { seq: 3, at: 600 });
+      overlay.showRaw('罗锅老奶奶的时候，', 3);
+      overlay.setTranslation('Updated answer', false, '罗锅老奶奶的时候，', 3);
+      assert.equal(overlay.tokens.map((token) => token.text).join(''), '罗锅老奶奶的时候，');
+      assert.equal(overlay.tr.textContent, 'Updated answer');
+      overlay.identifySubtitle('走吧', { seq: 4, at: 1100 });
+      overlay.showRaw('走吧', 4);
+      assert.equal(overlay.tokens.map((token) => token.text).join(''), '走吧',
+        'Repeated reads must not extend the grouping window of the original subtitle');
+    }
     vm.runInContext(readFileSync(new URL('../extension/content/overlay.js', import.meta.url), 'utf8'), context);
     const overlay = Object.create(context.HSR.Overlay.prototype);
     Object.assign(overlay, {

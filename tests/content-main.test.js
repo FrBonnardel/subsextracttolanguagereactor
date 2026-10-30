@@ -50,17 +50,41 @@ async function harness(hostname = 'www.youtube.com') {
       updateAdState, ad, onLine, resetLine,
       entries, checkReplay, translateLine, applyTranslation,
       overlay,
+      setSettings(values) { settings = { ...settings, ...values }; },
+      setStory(text) { story = { page: episode, text, pending: false, done: true }; },
+      storySnapshot,
       clearOCR() { smoother.onClear(); },
       setVideo(value) { tracker.video = value; },
       get currentLine() { return currentLine; },
       get replaying() { return replaying; },
       native(value) { usingNative = value; },
       queued: () => trQueue.length,
+      captureOnce,
+      scheduleCapture(engine, direct, native = false) {
+        settings = { ...settings, ocrEngine: engine };
+        usingDirect = direct;
+        usingNative = native;
+        schedule();
+      },
+      applyOcrResult(res, translator = 'python', requestEpoch = epoch) {
+        settings = { ...settings, translator, stableFrames: 1 };
+        smoother.configure(settings);
+        applyResult({
+          seq: 1, epoch: requestEpoch, force: false, frameTime: 30,
+          capturedAt: Date.now(), direct: true, video: tracker.video,
+          rect: { width: 1280, height: 720 },
+        }, res);
+      },
+      setupCapture(engine = 'python') {
+        settings = { ...settings, ocrEngine: engine };
+        tracker.contentRect = () => ({ left: 0, top: 0, width: 1280, height: 720 });
+        grabFromVideo = () => 'data:image/png;base64,cropped';
+      },
     };
   })();`, context);
   const flush = async () => { for (let i = 0; i < 15; i++) await Promise.resolve(); };
   return {
-    context, api: context.api, messages, displayed, raw, logs, flush,
+    context, api: context.api, messages, displayed, raw, logs, flush, timers,
     advance(ms) { now += ms; },
     async displayDelay() {
       for (const [id, timer] of [...timers]) {
@@ -89,6 +113,79 @@ function video(overrides = {}) {
   };
 }
 
+test('only Python direct capture uses 100 ms; screenshots and other engines keep existing limits', async () => {
+  const h = await harness();
+  for (const [engine, direct, expected] of [['python', true, 100], ['python', false, 500], ['paddle', true, 300]]) {
+    h.api.scheduleCapture(engine, direct);
+    assert.equal([...h.timers.values()].at(-1).ms, expected);
+  }
+  h.api.scheduleCapture('python', true, true);
+  assert.equal([...h.timers.values()].at(-1).ms, 250);
+});
+
+test('Python captures and translation jobs receive the existing episode story and preceding dialogue', async () => {
+  const h = await harness();
+  h.api.setVideo(video());
+  h.api.setupCapture();
+  h.api.setSettings({ translator: 'python', storyContext: true });
+  h.api.setStory('Video title: Example\nWikipedia synopsis: 谢时 (Xie Shi).');
+  await h.api.onLine('大家好', 28);
+  await h.settle();
+  await h.api.captureOnce();
+  const captured = h.messages.find((msg) => msg.type === 'OCR_FRAME').opts.translationContext;
+  assert.equal(captured.context[0].text, '大家好');
+  assert.match(captured.story, /Xie Shi/);
+  assert.equal(h.api.storySnapshot().enabled, true);
+  await h.api.onLine('我是谢时', 30);
+  await h.settle();
+  const translated = h.messages.filter((msg) => msg.type === 'TRANSLATE').at(-1);
+  assert.equal(translated.context[0].text, '大家好');
+  assert.equal(translated.story, captured.story);
+});
+
+test('Python reloads keep history text as context but do not replay legacy context-free translations', async () => {
+  for (const translator of ['python', 'nano']) {
+    const h = await harness();
+    h.api.setSettings({ translator });
+    h.context.chrome.runtime.sendMessage = async (msg) => {
+      if (msg.type !== 'GET_HISTORY') return {};
+      return { items: [{
+        text: '我是谢时', translation: "I'm grateful", time: 30,
+        page: 'https://www.youtube.com/watch\u0000Test video',
+      }] };
+    };
+    h.api.entries();
+    await h.flush();
+    const [entry] = h.api.entries();
+    assert.equal(entry.text, '我是谢时');
+    assert.equal(entry.translation, translator === 'python' ? undefined : "I'm grateful");
+  }
+});
+
+test('Python displayed timing summaries retain a bounded rolling window and exclude duplicate display events', async () => {
+  const h = await harness();
+  for (let seq = 0; seq < 35; seq++) {
+    const item = { seq, text: '快点', timing: {
+      capturedAt: Date.now() - 150, ocrCompletedAt: Date.now() - 20,
+      pythonStages: { total_ms: 100, geometry_ms: 20, ocr_ms: 60, translation_ms: 20 },
+      pythonRoundTripMs: 110,
+    } };
+    h.api.overlay.onSubtitleDisplay(item, 'translation');
+    h.api.overlay.onSubtitleDisplay(item, 'translation');
+  }
+  const summaries = h.logs.filter((log) => log[2].startsWith('Python latency summary '));
+  assert.equal(summaries.length, 35);
+  const summary = JSON.parse(summaries.at(-1)[2].replace('Python latency summary ', ''));
+  assert.equal(summary.samples, 30);
+  assert.equal(summary.serverMs.mean, 100);
+  assert.equal(summary.bridgeRoundTripMs.p95, 110);
+  h.api.resetLine();
+  const timing = { capturedAt: Date.now() - 50, ocrCompletedAt: Date.now(), pythonStages: { total_ms: 30 } };
+  h.api.overlay.onSubtitleDisplay({ seq: 40, text: '走吧', timing }, 'translation');
+  const last = h.logs.filter((log) => log[2].startsWith('Python latency summary ')).at(-1)[2];
+  assert.equal(JSON.parse(last.replace('Python latency summary ', '')).samples, 1);
+});
+
 test('timing logs correlate capture metadata, identification, translation dispatch, response and display', async () => {
   const h = await harness();
   const capturedAt = Date.now() - 100;
@@ -111,6 +208,88 @@ test('timing logs correlate capture metadata, identification, translation dispat
   assert.match(h.logs.at(-1)[2], /captureToDisplayMs/);
 });
 
+test('Python captures only one frame in flight and takes a fresh paused frame after busy work finishes', async () => {
+  const h = await harness();
+  const v = video();
+  h.api.setVideo(v);
+  h.api.setupCapture();
+  const resolvers = [];
+  h.context.chrome.runtime.sendMessage = async (msg) => {
+    h.messages.push(msg);
+    if (msg.type === 'OCR_FRAME') return new Promise((resolve) => resolvers.push(resolve));
+    return {};
+  };
+  const initial = h.api.captureOnce();
+  await h.api.captureOnce();
+  assert.equal(h.messages.filter((msg) => msg.type === 'OCR_FRAME').length, 1);
+  v.paused = true;
+  v.currentTime = 31;
+  await h.api.captureOnce(true);
+  assert.equal(resolvers.length, 1);
+  resolvers[0]({ skipped: true, reason: 'test' });
+  await initial;
+  await h.flush();
+  assert.equal(resolvers.length, 2, 'Paused capture must be retried after the busy request completes');
+  assert.equal(h.messages.filter((msg) => msg.type === 'OCR_FRAME').length, 2);
+  resolvers[1]({ skipped: true, reason: 'test' });
+  await h.flush();
+});
+
+test('a translation returned with Python OCR skips settling and releases the previous subtitle display hold', async () => {
+  const h = await harness();
+  h.api.setVideo(video());
+  h.api.applyOcrResult({ text: '快点', confidence: 95, quality: 1, pythonTranslationReady: true,
+    pythonTranslation: 'Hurry up' });
+  await h.flush();
+  assert.equal(h.messages.filter((msg) => msg.type === 'TRANSLATE').length, 0);
+  assert.deepEqual(h.displayed, ['Hurry up']);
+  h.api.setStory('Background changed after the capture');
+  h.api.applyOcrResult({ text: '走吧', confidence: 95, quality: 1, pythonTranslationReady: true,
+    pythonTranslation: "Let's go" });
+  await h.flush();
+  assert.equal(h.messages.filter((msg) => msg.type === 'TRANSLATE').length, 0);
+  assert.deepEqual(h.raw, ['快点', '走吧']);
+  assert.deepEqual(h.displayed, ['Hurry up', "Let's go"]);
+  await h.settle();
+  assert.equal(h.messages.filter((msg) => msg.type === 'TRANSLATE').length, 0);
+  assert.equal(h.api.entries().at(-1).translation, "Let's go");
+});
+
+test('Chrome vision bundled English reaches overlay and history without text translation', async () => {
+  const h = await harness();
+  h.api.setVideo(video());
+  h.api.applyOcrResult({ text: '我们明天见', confidence: null, quality: 1,
+    pythonTranslationReady: true, pythonTranslation: 'See you tomorrow.',
+    bundledTranslationProvider: 'nano' }, 'nano');
+  await h.flush();
+  assert.deepEqual(h.displayed, ['See you tomorrow.']);
+  assert.equal(h.messages.filter((msg) => msg.type === 'TRANSLATE').length, 0);
+  assert.equal(h.api.entries().at(-1).translation, 'See you tomorrow.');
+});
+
+test('missing ready translations and other translator choices retain the OCR settling wait', async () => {
+  for (const [translator, pythonTranslationReady] of [['python', false], ['nano', true]]) {
+    const h = await harness();
+    h.api.setVideo(video());
+    h.api.applyOcrResult({ text: '快点', confidence: 95, quality: 1, pythonTranslationReady,
+      pythonTranslation: 'Bundled Python output' }, translator);
+    await h.flush();
+    assert.equal(h.messages.filter((msg) => msg.type === 'TRANSLATE').length, 0);
+    await h.settle();
+    assert.equal(h.messages.filter((msg) => msg.type === 'TRANSLATE').length, 1);
+  }
+});
+
+test('ready Python translations cannot bypass stale-frame rejection', async () => {
+  const h = await harness();
+  h.api.setVideo(video());
+  h.api.applyOcrResult({ text: '快点', confidence: 95, quality: 1, pythonTranslationReady: true,
+    pythonTranslation: 'Stale translation' }, 'python', -1);
+  await h.flush();
+  assert.equal(h.messages.filter((msg) => msg.type === 'TRANSLATE').length, 0);
+  assert.deepEqual(h.raw, []);
+});
+
 test('new OCR keeps the previous translation for at most 500 ms, or replaces it when ready', async () => {
   const h = await harness();
   await h.api.onLine('快点', 30);
@@ -123,6 +302,76 @@ test('new OCR keeps the previous translation for at most 500 ms, or replaces it 
   assert.equal(h.raw.at(-1), '走吧');
   await h.displayDelay();
   assert.equal(h.raw.at(-1), '你干什么');
+});
+
+test('hybrid Nano starts translation without settling while retaining the previous subtitle until ready', async () => {
+  const h = await harness();
+  h.api.setVideo(video());
+  h.api.setSettings({ ocrEngine: 'paddle-vision' });
+  h.api.applyOcrResult({ text: '快点', confidence: 95, quality: 1,
+    pythonTranslationReady: true, pythonTranslation: 'Hurry up',
+    bundledTranslationProvider: 'nano' }, 'nano');
+  await h.flush();
+  let resolveTranslation;
+  h.context.chrome.runtime.sendMessage = async (msg) => {
+    h.messages.push(msg);
+    if (msg.type === 'TRANSLATE') return new Promise((resolve) => { resolveTranslation = resolve; });
+    return {};
+  };
+  h.api.setVideo(video({ currentTime: 32 }));
+  await h.api.onLine('走吧', 32);
+  assert.equal(h.messages.filter((msg) => msg.type === 'TRANSLATE').length, 1);
+  assert.equal([...h.timers.values()].some((timer) => timer.ms === 350), false);
+  assert.deepEqual(h.raw, ['快点']);
+  assert.deepEqual(h.displayed, ['Hurry up']);
+  resolveTranslation({ translation: "Let's go" });
+  await h.flush();
+  assert.deepEqual(h.raw, ['快点', '走吧']);
+  assert.deepEqual(h.displayed, ['Hurry up', "Let's go"]);
+  await h.displayDelay();
+  assert.deepEqual(h.raw, ['快点', '走吧']);
+});
+
+test('hybrid Nano retains the 500 ms display deadline when translation is slow', async () => {
+  const h = await harness();
+  h.api.setSettings({ ocrEngine: 'paddle-vision', translator: 'nano' });
+  await h.api.onLine('快点', 30);
+  await h.flush();
+  let resolveTranslation;
+  h.context.chrome.runtime.sendMessage = async (msg) => {
+    h.messages.push(msg);
+    if (msg.type === 'TRANSLATE') return new Promise((resolve) => { resolveTranslation = resolve; });
+    return {};
+  };
+  await h.api.onLine('走吧', 32);
+  assert.deepEqual(h.raw, ['快点']);
+  await h.displayDelay();
+  assert.deepEqual(h.raw, ['快点', '走吧']);
+  resolveTranslation({ translation: "Let's go" });
+  await h.flush();
+  assert.deepEqual(h.displayed, ['Translated', "Let's go"]);
+});
+
+test('hybrid Nano discards an in-flight partial OCR translation and translates its correction next', async () => {
+  const h = await harness();
+  h.api.setSettings({ ocrEngine: 'paddle-vision', translator: 'nano' });
+  const resolvers = [];
+  h.context.chrome.runtime.sendMessage = async (msg) => {
+    h.messages.push(msg);
+    if (msg.type === 'TRANSLATE') return new Promise((resolve) => resolvers.push(resolve));
+    return {};
+  };
+  await h.api.onLine('业务水', 30, { quality: 0.9 });
+  await h.api.onLine('业务水平', 30.6, { quality: 1 });
+  assert.equal(resolvers.length, 1);
+  resolvers[0]({ translation: 'Partial' });
+  await h.flush();
+  assert.deepEqual(h.displayed, []);
+  assert.deepEqual(h.messages.filter((msg) => msg.type === 'TRANSLATE').map((msg) => msg.text),
+    ['业务水', '业务水平']);
+  resolvers[1]({ translation: 'Professional skills' });
+  await h.flush();
+  assert.deepEqual(h.displayed, ['Professional skills']);
 });
 
 test('translation arriving during the OCR reading hold is displayed, but not after its deadline', async () => {

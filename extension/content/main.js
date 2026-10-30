@@ -25,6 +25,32 @@
   const AD_EXIT_MS = 1000; // signals must be gone this long before OCR resumes
   const log = (level, ...parts) => HSR_log(level, `content ${location.hostname}`, ...parts);
   const subtitleTimings = new Map();
+  const pythonDisplaySamples = [];
+
+  function summarizePythonTiming(timing) {
+    if (!timing.pythonStages || timing.pythonSummaryRecorded || timing.capturedAt == null) return;
+    timing.pythonSummaryRecorded = true;
+    pythonDisplaySamples.push({
+      captureToDisplayMs: timing.translationDisplayedAt - timing.capturedAt,
+      captureToOcrMs: timing.ocrCompletedAt - timing.capturedAt,
+      serverMs: timing.pythonStages.total_ms,
+      geometryMs: timing.pythonStages.geometry_ms,
+      ocrMs: timing.pythonStages.ocr_ms,
+      translationMs: timing.pythonStages.translation_ms,
+      bridgeRoundTripMs: timing.pythonRoundTripMs,
+    });
+    if (pythonDisplaySamples.length > 30) pythonDisplaySamples.shift();
+    const metrics = {};
+    for (const key of Object.keys(pythonDisplaySamples[0])) {
+      const values = pythonDisplaySamples.map((sample) => sample[key]).filter(Number.isFinite).sort((a, b) => a - b);
+      if (!values.length) continue;
+      metrics[key] = {
+        mean: Math.round(values.reduce((sum, value) => sum + value, 0) / values.length),
+        p95: Math.round(values[Math.ceil(values.length * 0.95) - 1]),
+      };
+    }
+    log('info', `Python latency summary ${JSON.stringify({ samples: pythonDisplaySamples.length, ...metrics })}`);
+  }
 
   function logSubtitleTiming(stage, seq, text, timing, extra = {}) {
     if (!timing) return;
@@ -100,6 +126,7 @@
       logSubtitleTiming(`${kind} displayed`, item.seq, item.text, item.timing, {
         captureToDisplayMs: item.timing.capturedAt == null ? null : item.timing[key] - item.timing.capturedAt,
       });
+      if (kind === 'translation') summarizePythonTiming(item.timing);
     },
     onWordOpen: (token) => panel('word', { text: token.text }),
     onCardToggle(open) {
@@ -116,7 +143,10 @@
   });
 
   const smoother = new HSR.SubtitleSmoother({
-    onLine: (text, time, quality, timing) => onLine(text, time, { quality, timing, immediate: !!tracker.video?.paused }),
+    onLine: (text, time, quality, timing) => onLine(text, time, {
+      quality, timing,
+      immediate: !!tracker.video?.paused || (settings.translator === (timing?.bundledTranslationProvider ?? 'python') && timing?.pythonTranslationReady === true),
+    }),
     onClear: () => {
       closeOpenEntry(tracker.video?.currentTime ?? 0);
       dismissed = replaying; // OCR saw this cached line disappear; don't bring it back
@@ -188,7 +218,14 @@
 
   function ocrOpts() {
     const { ocrEngine, ocrLang, cropTop, cropBottom, textThreshold, subtitleColor, minConfidence, ocrUserWords, ocrCharWhitelist, ocrDictCorrection, ocrPreprocess, ocrEdgeBoost, ocrCenteredOnly } = settings;
-    return { ocrEngine, ocrLang, cropTop, cropBottom, textThreshold, subtitleColor, minConfidence, ocrUserWords, ocrCharWhitelist, ocrDictCorrection, ocrPreprocess, ocrEdgeBoost, ocrCenteredOnly };
+    return {
+      ocrEngine, ocrLang, cropTop, cropBottom, textThreshold, subtitleColor, minConfidence,
+      ocrUserWords, ocrCharWhitelist, ocrDictCorrection, ocrPreprocess, ocrEdgeBoost, ocrCenteredOnly,
+      ...(((ocrEngine === 'python' && settings.translator === 'python')
+        || ['prompt', 'paddle-vision'].includes(ocrEngine)) && {
+        translationContext: { context: contextFor('', tracker.video?.currentTime), story: storyText() },
+      }),
+    };
   }
 
   let lastState = null;
@@ -208,6 +245,7 @@
   let lastThumb = null;
   let epoch = 0; // bumped on tab hide / video change so in-flight results are dropped
   let pending = 0;
+  let pythonForcedFramePending = false;
   let nextRequest = 0;
   let nextDelivery = 0;
   const results = new Map(); // request seq -> { req, res }, applied strictly in capture order
@@ -269,8 +307,12 @@
       logState(`idle – video too small or detached (${rect ? `${Math.round(rect.width)}x${Math.round(rect.height)}` : 'no rect'})`);
       return Promise.resolve();
     }
-    const limit = directBlocked.has(video) ? 1 : MAX_INFLIGHT;
-    if (!force && pending >= limit) return Promise.resolve(); // OCR saturated; a subtitle spans many ticks
+    const visualPipeline = ['python', 'prompt', 'paddle-vision'].includes(settings.ocrEngine);
+    const limit = directBlocked.has(video) || visualPipeline ? 1 : MAX_INFLIGHT;
+    if (pending >= limit && (!force || visualPipeline)) {
+      if (force && visualPipeline) pythonForcedFramePending = true;
+      return Promise.resolve();
+    }
 
     const frameTime = video.currentTime; // when the frame was snapped, not when OCR finishes
     const capturedAt = Date.now();
@@ -279,7 +321,7 @@
     const req = { seq: nextRequest++, epoch, force, frameTime, capturedAt, direct: Boolean(frame), rect, video };
     log('info', `Subtitle frame #${req.seq} captured at ${new Date(capturedAt).toISOString()}, video ${frameTime.toFixed(3)}s (${frame ? 'direct' : 'screenshot requested'})`);
     const msg = frame
-      ? { type: 'OCR_FRAME', dataUrl: frame, opts: ocrOpts(), fresh: force }
+      ? { type: 'OCR_FRAME', dataUrl: frame, opts: { ...ocrOpts(), capturedAt }, fresh: force }
       : {
         type: 'CAPTURE_OCR',
         rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
@@ -288,7 +330,7 @@
         fresh: force,
       };
     pending++;
-    return withTimeout(send(msg), OCR_TIMEOUT_MS)
+    return withTimeout(send(msg), settings.ocrEngine === 'python' ? 17000 : OCR_TIMEOUT_MS)
       .then((res) => {
         results.set(req.seq, { req, res });
         while (results.has(nextDelivery)) {
@@ -297,7 +339,13 @@
           applyResult(r.req, r.res);
         }
       })
-      .finally(() => { pending--; });
+      .finally(() => {
+        pending--;
+        if (!pending && pythonForcedFramePending) {
+          pythonForcedFramePending = false;
+          if (!dead && ['python', 'prompt', 'paddle-vision'].includes(settings.ocrEngine) && enabledHere() && visible && !document.hidden) captureOnce(true);
+        }
+      });
   }
 
   function applyResult(req, res) {
@@ -313,15 +361,24 @@
     }
     const { video, rect } = req;
     logState(req.direct
-      ? `running (direct video frame ${video.videoWidth}x${video.videoHeight}, up to ${MAX_INFLIGHT} frames in flight)`
+      ? `running (direct video frame ${video.videoWidth}x${video.videoHeight}, up to ${['python', 'prompt', 'paddle-vision'].includes(settings.ocrEngine) ? 1 : MAX_INFLIGHT} frames in flight)`
       : `running (tab screenshot, video ${Math.round(rect.width)}x${Math.round(rect.height)} @ ${rect.left | 0},${rect.top | 0}, dpr ${devicePixelRatio})`);
     usingDirect = req.direct;
-    if (!res.unchanged) log('debug', `OCR (${Math.round(res.confidence)}%) @${req.frameTime.toFixed(1)}s: ${res.text || '∅'}`);
+    if (!res.unchanged) log('debug', `OCR (${res.confidence == null ? 'confidence unavailable' : `${Math.round(res.confidence)}%`}) @${req.frameTime.toFixed(1)}s: ${res.text || '∅'}`);
     if (res.debug) {
       panel('frame', { ...res.debug, text: res.text, confidence: res.confidence, unchanged: !!res.unchanged, mode: req.direct ? 'direct' : 'screenshot' });
     }
     overlay.setStatus('');
-    const timing = { frame: req.seq, capturedAt: req.capturedAt, videoTime: req.frameTime, ocrCompletedAt: Date.now() };
+    const timing = {
+      frame: req.seq, capturedAt: req.capturedAt, videoTime: req.frameTime, ocrCompletedAt: Date.now(),
+      ...(res.pythonTranslationReady === true && { pythonTranslationReady: true }),
+      ...(res.bundledTranslationProvider && { bundledTranslationProvider: res.bundledTranslationProvider }),
+      ...(res.pythonTranslationReady === true && typeof res.pythonTranslation === 'string'
+        && res.pythonTranslation.trim() && {
+        pythonTranslation: res.pythonTranslation, pythonTranslationText: res.text,
+      }),
+      ...(res.pythonStages && { pythonStages: res.pythonStages, pythonRoundTripMs: res.pythonRoundTripMs }),
+    };
     if (req.force) {
       log('info', `Paused frame OCR: ${res.text || '(no subtitle)'}`);
       smoother.force(res.text, req.frameTime, res.quality, timing);
@@ -346,7 +403,9 @@
     clearTimeout(timer);
     if (!dead) {
       const ms = usingNative ? NATIVE_INTERVAL
-        : Math.max(usingDirect ? MIN_DIRECT_INTERVAL : MIN_INTERVAL, settings.captureIntervalMs);
+        : settings.ocrEngine === 'python' && usingDirect
+          ? 100
+          : Math.max(usingDirect ? MIN_DIRECT_INTERVAL : MIN_INTERVAL, settings.captureIntervalMs);
       timer = setTimeout(tick, ms);
     }
   }
@@ -554,7 +613,10 @@
       if (timeline.entries.some((e) => e.text === item.text && Math.abs(e.start - item.time) < REPLAY_MATCH_S)) return;
       const next = items[k + 1];
       const end = next && next.time - item.time < REPLAY_MAX_LINE_S ? next.time : item.time + 3;
-      timeline.entries.push({ start: item.time, end, text: item.text, translation: !item.error && item.translation ? item.translation : undefined });
+      timeline.entries.push({
+        start: item.time, end, text: item.text,
+        translation: settings.translator !== 'python' && !item.error && item.translation ? item.translation : undefined,
+      });
     });
     timeline.entries.sort((a, b) => a.start - b.start);
     if (items.length) log('info', `Replay timeline: ${timeline.entries.length} known lines for this page`);
@@ -600,7 +662,7 @@
     }
   }
 
-  const storyEnabled = () => settings.storyContext && ['ollama', 'nano'].includes(settings.translator);
+  const storyEnabled = () => settings.storyContext && ['ollama', 'nano', 'python'].includes(settings.translator);
   const storyText = () => (storyEnabled() && story.page === episode ? story.text : '');
   const storySnapshot = () => ({
     page: episode, text: storyText(), enabled: !!storyEnabled(),
@@ -709,6 +771,7 @@
   }
 
   function resetLine() {
+    pythonDisplaySamples.length = 0;
     subtitleTimings.clear();
     cancelPendingDisplay();
     displayTranslated = false;
@@ -882,6 +945,16 @@
       });
     }
     if (!settings.showTranslation) return;
+    if (settings.translator === (timing.bundledTranslationProvider ?? 'python')
+        && timing.pythonTranslationText === text && timing.pythonTranslation) {
+      timing.translatedAt = timing.ocrCompletedAt;
+      logSubtitleTiming('bundled OCR translation ready', seq, text, timing);
+      applyTranslation({ text, seq, entry }, {
+        translation: timing.pythonTranslation, via: { provider: settings.translator, model: 'bundled-ocr' },
+      }, 0);
+      pumpTranslations();
+      return;
+    }
     if (entry?.translation) {
       timing.cached = true;
       logSubtitleTiming('cached translation ready', seq, text, timing);
@@ -912,7 +985,8 @@
     clearTimeout(trSettleTimer);
     trSettleTimer = 0;
     trPending = null;
-    if (!immediate && !usingNative && !replaying) {
+    const hybridNano = settings.ocrEngine === 'paddle-vision' && settings.translator === 'nano';
+    if (!immediate && !usingNative && !replaying && !hybridNano) {
       trPending = job;
       trSettleTimer = setTimeout(() => {
         trSettleTimer = 0;
@@ -1054,7 +1128,7 @@
     smoother.configure(settings);
     overlay.applySettings(settings);
     applyActive();
-    const retranslate = ['targetLang', 'translator', 'ollamaModel', 'deeplKey'].some((k) => settings[k] !== before[k]);
+    const retranslate = ['targetLang', 'translator', 'ollamaModel', 'deeplKey', 'pythonUrl'].some((k) => settings[k] !== before[k]);
     if (tracker.video) loadStoryContext(); // no-op unless story context just became enabled for this page
     panel('story', storySnapshot());
     if (tracker.video && settings.translator !== before.translator) warmupTranslator();

@@ -1,4 +1,4 @@
-// Prompt shared by the LLM translators (Ollama, Gemini Nano): natural, context-aware dialogue translation.
+// Prompt shared by the LLM translators (Ollama, Gemini Nano, Python Qwen).
 
 export function dialogueSystemPrompt(target) {
   const language = new Intl.DisplayNames(['en'], { type: 'language' }).of(target) ?? target;

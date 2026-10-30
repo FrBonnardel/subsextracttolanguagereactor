@@ -1,4 +1,4 @@
-// Story context for Ollama: tab title/description of the video page plus a Wikipedia synopsis.
+// Story context for local LLM translators: page title/description plus a Wikipedia synopsis.
 // Only short summaries are used, never scripts or transcripts.
 
 const MAX_TITLE = 200;

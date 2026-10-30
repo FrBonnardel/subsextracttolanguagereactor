@@ -14,17 +14,17 @@
       <label>Translator
         <select name="translator">
           <option value="nano">Gemini Nano (Chrome on-device LLM, free, natural dialogue)</option>
+          <option value="python">Python local bridge (Qwen, context-aware Chinese to English)</option>
           <option value="chrome">Chrome built-in (on-device, free, literal)</option>
-          <option value="opus">Opus-MT via Transformers.js (offline, English only)</option>
-          <option value="ollama">Ollama (local LLM)</option>
           <option value="deepl">DeepL API</option>
         </select>
       </label>
-      <label class="check"><input type="checkbox" name="translationContext"> Use earlier dialogue of this video as context (DeepL, Ollama, Gemini Nano, Chrome)</label>
+      <label class="check"><input type="checkbox" name="translationContext"> Use earlier dialogue of this video as context (DeepL, Gemini Nano, Python Qwen, Chrome)</label>
       <div data-provider="nano">
-        <p class="hint">Runs Chrome's built-in Gemini Nano model locally – no API key, no server. It follows the same natural-dialogue instructions as Ollama and reads up to eight earlier lines of this video. Needs Chrome 138+ with a capable GPU (or 16 GB RAM) and ~22 GB free disk; click <b>Prepare model</b> once to download it (~2 GB). Best output quality in English, Spanish and Japanese.</p>
+        <p class="hint">Runs Chrome's built-in Gemini Nano model locally – no API key, no server. It follows natural-dialogue instructions and reads up to eight earlier lines of this video. Needs Chrome 138+ with a capable GPU (or 16 GB RAM) and ~22 GB free disk; click <b>Prepare model</b> once to download it (~2 GB). Best output quality in English, Spanish and Japanese.</p>
+        <p class="hint">Depending on your Chrome version, Gemini Nano may require enabling <code>chrome://flags/#prompt-api</code> and restarting Chrome. Translation sends only text; the separate Prompt API image OCR engine below sends subtitle images. The <code>#prompt-api-multimodal-input</code> flag concerns image/audio input to the Prompt API. The experimental <code>#on-device-model-speculative-decoding</code> flag may also be available, but a speed improvement is not guaranteed. Flag names and availability vary by Chrome version.</p>
       </div>
-      <div data-provider="ollama nano">
+      <div data-provider="nano python">
         <label class="check"><input type="checkbox" name="storyContext"> Use video background as story context</label>
         <p class="hint">When a video is found (usually before it starts) or paused, reads the tab title and page description once per page and looks up a short synopsis on Wikipedia (sends the title to wikipedia.org). The model uses it for names, relationships and terminology. Scripts or transcripts are never fetched.</p>
       </div>
@@ -43,15 +43,6 @@
           <option value="pro">Pro (api.deepl.com)</option>
         </select>
       </label>
-      </div>
-      <div data-provider="ollama">
-        <label>Ollama URL <input type="text" name="ollamaUrl" spellcheck="false"></label>
-        <label>Model <input type="text" name="ollamaModel" spellcheck="false" placeholder="qwen2.5:7b"></label>
-        <p class="hint">Ollama is instructed to translate intended meaning naturally, using supplied dialogue for ambiguous words, tone, and story continuity. It does not see the video; enable subtitle context above for preceding dialogue and story context for the show's background.</p>
-        <p class="hint">Start Ollama with <code>OLLAMA_ORIGINS=chrome-extension://*</code> so it accepts requests from the extension.</p>
-      </div>
-      <div data-provider="opus">
-        <p class="hint">Downloads <code>Xenova/opus-mt-zh-en</code> (~100 MB) from Hugging Face once, then runs offline.</p>
       </div>
       <label>Target language
         <select name="targetLang">
@@ -75,10 +66,22 @@
         </select>
       </label>
       <div class="actions">
-        <button type="button" id="prepareModel" data-provider="chrome nano opus">Prepare model</button>
+        <button type="button" id="prepareModel" data-provider="chrome nano">Prepare model</button>
         <button type="button" id="testKey">Test translation</button>
         <button type="button" id="clearCache" class="secondary">Clear translation cache</button>
         <span id="deeplResult" class="result"></span>
+      </div>
+    </section>
+
+    <section>
+      <h2>Python local bridge</h2>
+      <p class="hint">Optional companion app: Chrome uses text-block detection and its existing local Paddle recognizer to select Chinese rows and avoid sending the same subtitle again. A changed or more complete reading triggers a new image; no Chinese reading returns empty evidence without contacting Python. Local Paddle assets are required. Chrome crops and stacks original-color Chinese rows with safety margins, excluding embedded English and unused width. Python no longer runs Paddle in default mode: it lightly sharpens the crop, then Qwen3-VL-2B transcribes and translates with context in one call, using a 230-token visual budget. Raw extension Paddle text is sent for logs/debug only, never as VLM prompt input or final transcription. Automatic cropping can still miss text; use debug to inspect the green crop regions. Confidence thresholds do not apply; centre, color and outline settings guide Chrome's row detection. Select Python for both OCR engine and Translator. Enable dialogue and story context above to reuse recent lines and title/description/synopsis. English translation targets only; other engines remain unchanged.</p>
+      <label>Local service URL <input type="text" name="pythonUrl" spellcheck="false"></label>
+      <label>Local bridge token <input type="password" id="pythonToken" autocomplete="off" spellcheck="false" placeholder="Copy from the Python app"></label>
+      <p class="hint">Loopback HTTP only. The token stays in this Chrome profile's local storage, not Chrome Sync. Run the companion app before testing. No images are sent to a cloud service.</p>
+      <div class="actions">
+        <button type="button" id="testPython">Test Python connection</button>
+        <span id="pythonResult" class="result" role="status" aria-live="polite"></span>
       </div>
     </section>
 
@@ -99,10 +102,30 @@
       <h2>OCR</h2>
       <label>OCR engine
         <select name="ocrEngine">
+          <option value="prompt">Chrome Prompt API image OCR (Gemma/Nano, experimental)</option>
+          <option value="paddle-vision">PaddleOCR primary + Chrome vision fallback</option>
+          <option value="python">Python local bridge (OCR + translation)</option>
           <option value="paddle">PaddleOCR v4 on GPU (WebGPU, CPU fallback) – fast</option>
           <option value="tesseract">Tesseract (CPU)</option>
         </select>
       </label>
+      <div id="promptOcrSettings" hidden>
+        <p class="hint">Paddle selects and crops Chinese rows in original color and skips unchanged subtitles. Chrome's local image-capable Prompt API returns Chinese and English together, with output languages undeclared. Select Gemini Nano as translator to use that English directly without a second translation call. Requires local Paddle assets; no Python or cloud service.</p>
+        <p class="hint">Experimental: may be slower than PaddleOCR and may misread or invent text. Centred-only filtering is an instruction to the model, not a bounding-box check. Preprocessing, confidence thresholds and dictionary glyph correction do not apply. Keep the crop band tight around subtitles.</p>
+        <div class="actions">
+          <button type="button" id="prepareOcrModel">Download OCR model</button>
+          <button type="button" id="inspectPromptApi">Inspect Prompt API capabilities</button>
+          <button type="button" id="testImageEnglish">Test image → English</button>
+          <button type="button" id="testImageBilingual">Test image → Chinese + English</button>
+          <span id="ocrModelResult" class="result" role="status" aria-live="polite"></span>
+        </div>
+        <p class="hint">Inspect queries Chrome directly without downloading: default text, English/Chinese input and output, image input with English or Chinese output, and the exact OCR configuration. Shows raw availability values, native exception names/messages and sampling parameters. Availability is not proof of recognition accuracy. For Chrome's internal model diagnostics, open <code>chrome://on-device-internals</code> (if available in your build).</p>
+        <pre id="promptApiReport" hidden style="white-space: pre-wrap; overflow-wrap: anywhere; max-height: 480px; overflow: auto;"></pre>
+        <p class="hint">Image → English tests actual translation of a Chinese sample image with English-only language declarations. No Chinese text is supplied to the model prompt, and no download is started.</p>
+        <p id="imageEnglishResult" class="result" role="status" aria-live="polite"></p>
+        <p class="hint">Chinese + English test leaves output languages undeclared and asks for both fields as JSON. This is experimental: it checks exact Chinese transcription and shows the raw response for English accuracy review.</p>
+        <p id="imageBilingualResult" class="result" role="status" aria-live="polite"></p>
+      </div>
       <label>Subtitle script (Tesseract)
         <select name="ocrLang">
           <option value="chi_sim">Simplified</option>
@@ -187,6 +210,6 @@
 
   <script src="../shared/defaults.js"></script>
   <script src="../shared/log.js"></script>
-  <script src="options.js"></script>
+  <script type="module" src="options.js"></script>
 </body>
 </html>

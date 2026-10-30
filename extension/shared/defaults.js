@@ -3,13 +3,14 @@ globalThis.HSR_DEFAULTS = Object.freeze({
   enabled: true,
   disabledDomains: [],
 
-  translator: 'nano', // 'nano' (Gemini Nano on-device LLM, falls back to 'chrome') | 'chrome' (built-in on-device) | 'opus' (Transformers.js) | 'ollama' | 'deepl'
+  translator: 'nano', // 'nano' | 'python' (local Qwen) | 'chrome' | 'opus' | 'ollama' | 'deepl'
   targetLang: 'EN-US',
-  translationContext: true, // send earlier dialog of this video as context (DeepL, Ollama, Gemini Nano, Chrome)
+  translationContext: true, // send earlier dialogue (DeepL, Ollama, Gemini Nano, Python Qwen, Chrome)
   deeplKey: '',
   deeplPlan: 'auto', // 'auto' | 'free' | 'pro'
   ollamaUrl: 'http://localhost:11434',
   ollamaModel: 'qwen2.5:7b',
+  pythonUrl: 'http://127.0.0.1:8765', // token is kept in chrome.storage.local, never sync
   storyContext: false, // LLM translators: use the tab title/description + a Wikipedia synopsis as background
   nanoKeepalive: true, // Gemini Nano: tiny prompt every ~1 s of idle playback to reduce GPU idle gaps
 
@@ -17,7 +18,7 @@ globalThis.HSR_DEFAULTS = Object.freeze({
   subtitleSelector: '', // optional CSS selector for player-rendered subtitle text
   hideNativeSubs: true,
 
-  ocrEngine: 'paddle', // 'paddle' (PP-OCRv4 on GPU via WebGPU, CPU fallback) | 'tesseract'
+  ocrEngine: 'paddle', // 'python' (local bridge) | 'native' (TextDetector) | 'prompt' (Prompt API) | 'paddle' | 'tesseract'
   ocrLang: 'chi_sim', // Tesseract only: 'chi_sim' | 'chi_tra' | 'chi_sim+chi_tra'
   ocrPreprocess: 'enhanced', // 'enhanced' (grayscale top-hat + contrast + sharpen) | 'binary' (legacy threshold)
   ocrEdgeBoost: true, // strengthen strokes that have a dark outline/shadow

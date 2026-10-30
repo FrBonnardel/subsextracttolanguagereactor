@@ -272,9 +272,14 @@
     // ---- content -----------------------------------------------------------
 
     identifySubtitle(text, { seq, replaces, at, translation, tokens, timing }) {
-      const previous = this.dialogue?.find((item) => item.seq === replaces);
+      const normalize = (value) => value.replace(/[\s\p{P}]/gu, '');
+      const normalized = normalize(text);
+      const duplicate = (item) => item.text === text
+        || (normalized.length > 0 && normalize(item.text) === normalized);
+      const previous = this.dialogue?.find((item) => item.seq === replaces)
+        ?? this.dialogue?.findLast((item) => at >= item.at && at - item.at < 1000 && duplicate(item));
       this.dialogue = (this.dialogue ?? []).filter((item) => item.seq !== replaces
-        && at - item.at < 1000 && at >= item.at);
+        && at - item.at < 1000 && at >= item.at && !duplicate(item));
       this.dialogue.push({ text, seq, at: previous?.at ?? at, translation, tokens, timing });
     }
 

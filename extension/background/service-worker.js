@@ -2,6 +2,7 @@ import '../shared/defaults.js';
 import '../shared/log.js';
 import { translate, clearTranslationCache } from './translate.js';
 import { storyContext } from './story-context.js';
+import { pythonOcr, pythonHealth } from './python-bridge.js';
 
 const OFFSCREEN_PATH = 'offscreen/offscreen.html';
 const MAX_LOGS = 1000;
@@ -32,7 +33,9 @@ HSR_captureErrors('background');
 function describeVia(via) {
   if (!via) return 'unknown';
   const parts = [via.fallbackFrom ? `${via.provider} (fallback from ${via.fallbackFrom}: ${via.reason ?? 'not available'})` : via.provider];
-  if (via.model) parts.push(`model ${via.model}`, `prompt v${via.prompt}`, via.story ? 'story context' : 'no story context');
+  if (via.model) parts.push(`model ${via.model}`);
+  if (via.prompt != null) parts.push(`prompt v${via.prompt}`);
+  if (via.story != null) parts.push(via.story ? 'story context' : 'no story context');
   parts.push(`${via.contextLines} context line${via.contextLines === 1 ? '' : 's'}${via.prefilled ? ' (prefilled)' : ''}`);
   return parts.join(', ');
 }
@@ -84,6 +87,11 @@ async function toOffscreen(type, payload = {}) {
 }
 
 const handlers = {
+  PYTHON_HEALTH: async () => pythonHealth(await getSettings()),
+  PYTHON_OCR: async (msg, sender) => {
+    if (sender.url !== chrome.runtime.getURL(OFFSCREEN_PATH)) throw new Error('Python OCR is restricted to the offscreen crop pipeline.');
+    return pythonOcr(msg.image, msg.opts, await getSettings());
+  },
   async CAPTURE_OCR(msg, sender) {
     const tab = sender.tab;
     // captureVisibleTab grabs whatever tab is active, so only the visible tab may request it.
@@ -91,9 +99,11 @@ const handlers = {
     if (!tab.active) return { skipped: true, reason: 'tab not active in its window' };
     const isStillActive = async () => (await chrome.tabs.query({ active: true, windowId: tab.windowId }))[0]?.id === tab.id;
     let dataUrl;
+    let capturedAt;
     const t0 = performance.now();
     try {
       if (!(await isStillActive())) return { skipped: true, reason: 'tab not active in its window' };
+      capturedAt = Date.now();
       dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
       // The user may have switched tabs mid-capture; the image would then show another tab.
       if (!(await isStillActive())) return { skipped: true, reason: 'tab switched during capture' };
@@ -102,7 +112,7 @@ const handlers = {
       return { skipped: true, reason: `captureVisibleTab: ${e.message}` };
     }
     log('debug', `Captured tab ${tab.id} in ${Math.round(performance.now() - t0)} ms`);
-    return toOffscreen('OCR', { tabId: tab.id, dataUrl, rect: msg.rect, dpr: msg.dpr, opts: msg.opts, fresh: msg.fresh, debug: panelPorts > 0 });
+    return toOffscreen('OCR', { tabId: tab.id, dataUrl, rect: msg.rect, dpr: msg.dpr, opts: { ...msg.opts, capturedAt }, fresh: msg.fresh, debug: panelPorts > 0 });
   },
 
   OCR_FRAME: (msg, sender) =>
@@ -136,7 +146,7 @@ const handlers = {
 
   async STORY_CONTEXT(msg) {
     const settings = await getSettings();
-    if (!settings.storyContext || !['ollama', 'nano'].includes(settings.translator)) return { story: '' };
+    if (!settings.storyContext || !['ollama', 'nano', 'python'].includes(settings.translator)) return { story: '' };
     const res = await storyContext(msg.info);
     log('info', `Story context for "${msg.info.title}"${res.cached ? ' (cached)' : ''}: ${res.wikiTitle ? `Wikipedia "${res.wikiTitle}"` : 'no Wikipedia match'}`);
     return res;

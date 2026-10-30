@@ -22,11 +22,12 @@ Requires Node 18 or later (for the built-in `fetch`).
 |---|---|---|---|
 | **Chrome built-in** | On-device, Chrome's `Translator` API | Chrome 138+; click **Prepare model** once to download the language pack | Most languages |
 | **Gemini Nano** (default) | On-device LLM, Chrome's Prompt API (`LanguageModel`) in the offscreen document | Chrome 138+, GPU with >4 GB VRAM or 16 GB RAM, ~22 GB free disk; click **Prepare model** once (~2 GB download). No key, no server. Until the model is ready (or on unsupported devices) lines fall back to Chrome built-in, uncached | Best in English, Spanish, Japanese |
-| **Opus-MT** | On-device, Transformers.js + ONNX (WASM) in the offscreen document | Model (~100 MB) downloads from Hugging Face on first use, then is cached | English only |
-| **Ollama** | Local LLM server | Install Ollama, `ollama pull qwen2.5:7b`, start it with `OLLAMA_ORIGINS=chrome-extension://*` | Any |
+| **Python local bridge** | Extension Paddle pre-crop + Qwen3-VL-2B single-pass transcription/translation, managed llama.cpp CUDA server | Prepare and run the companion app; select Python OCR and translator, paste its local token | English only |
 | **DeepL** | Cloud API | API key (Free keys end in `:fx`) | DeepL languages |
 
 Translations are cached in `chrome.storage.local` per translator and target language.
+Opus-MT and local Ollama are no longer offered in Settings. Opening Settings with
+either saved selection switches it to Gemini Nano and displays a notice.
 
 Chrome built-in, Opus-MT and DeepL are machine translators and tend to be literal. The LLM translators (Gemini Nano, Ollama) follow a shared prompt (`shared/dialogue-prompt.js`) that asks for the speaker's intended meaning as natural dialogue.
 
@@ -36,7 +37,7 @@ With subtitle context enabled, earlier dialogue of the same video helps disambig
 
 The translators receive text, not video images. Chrome uses preceding lines only when its output preserves line boundaries; DeepL has a dedicated context field. Neither supports the custom dialogue instructions used for the LLMs. Opus-MT translates individual lines without context. Model choice still affects translation quality. The logs show which translator produced each line (`Translate via …`).
 
-**Story context (Gemini Nano / Ollama, opt-in).** With *Use video background as story context* enabled, the extension reads the tab title (e.g. `全职法师第7季-02-免费在线观看-爱壹帆` → `全职法师`) and page description once per page, as soon as a video is found (typically before it starts) or when it is paused, and looks up a short matching Wikipedia summary (zh.wikipedia.org for Chinese titles, en.wikipedia.org otherwise; the cleaned title is sent to Wikipedia). The lookup runs in the background and never delays subtitles: lines translated before it arrives are not retranslated; later lines use it. The background is cached per page for the browser session and passed to the LLM as untrusted context for names, relationships and terminology. Scripts or transcripts are never fetched.
+**Story context (Gemini Nano / Ollama / Python Qwen, opt-in).** With *Use video background as story context* enabled, the extension reads the tab title (e.g. `全职法师第7季-02-免费在线观看-爱壹帆` → `全职法师`) and page description once per page, as soon as a video is found (typically before it starts) or when it is paused, and looks up a short matching Wikipedia summary (zh.wikipedia.org for Chinese titles, en.wikipedia.org otherwise; the cleaned title is sent to Wikipedia). The lookup runs in the background and never delays subtitles: lines translated before it arrives are not retranslated; later lines use it. The background is cached per page for the browser session and passed to the LLM as untrusted context for names, relationships and terminology. Scripts or transcripts are never fetched. This is a show-level summary when one exists, not an automatically generated recap of the current episode.
 
 ## Project structure
 
@@ -53,7 +54,8 @@ extension/                  <- load this folder unpacked
   offscreen/
     offscreen.html/.js      long-lived document: OCR worker + dictionary in memory
     translator.js           on-device translation (Chrome Translator API, Opus-MT)
-    ocr.js                  crop -> preprocess -> change detection -> PaddleOCR / Tesseract
+    ocr.js                  crop -> TextDetector / Prompt API, or preprocess -> PaddleOCR / Tesseract
+    prompt-ocr.js           local Prompt API image OCR, capability checks and isolated frame sessions
     ocr-geometry.js         noise removal and text-dense subtitle line detection
     dictionary.js           CC-CEDICT index, token analysis, character breakdown
     segmenter.js            dictionary-driven DP word segmenter
@@ -132,9 +134,212 @@ Run `npm test` for OCR geometry regression tests, including a binary text-mask f
 
 ## Settings (options page)
 
+**Python local bridge (optional):** the companion project at `F:\GitHub\hanzi-to-subtitle-vlm`
+provides a desktop status window and authenticated loopback OCR + Chinese-to-English
+translation. Chrome retains video detection, the configured crop (including screenshot
+fallback), dictionary, overlay and history. Before sending anything to Python, the extension reuses
+its existing preprocessing and text-block detection (including faint-row recovery)
+to reject bands without plausible subtitle blocks. Empty/background frames are
+not PNG-encoded or sent to the bridge; they return empty OCR evidence to the
+subtitle smoother so stale subtitles can clear. The presence filter uses the
+selected preprocessing, color, outline and centre-filter settings. It is not
+language recognition: an English-only text block can still reach Paddle.
+For accepted frames, the extension first runs its existing Paddle recognizer on
+the original-color candidate rows. An unchanged Chinese reading reuses the latest
+successful Python result for that tab instead of sending another image, even on a
+forced capture or when preceding dialogue changes. Embedded English, whitespace
+and non-question/exclamation punctuation do not count as text changes. A longer
+reading or any changed letter/digit is sent again; there is no fuzzy similarity
+threshold that could hide a one-character correction. No local Chinese reading
+means empty OCR evidence without sending a frame. Blank frames, tab resets, changed crop/settings or story
+invalidate reuse. Only successful nonempty OCR/translation results are retained;
+busy/error/empty responses remain retryable. Local Paddle loading/inference errors
+are surfaced as OCR errors, not silently replaced by another engine.
+A shorter contiguous fragment (at least two normalized characters) of the last
+successful reading also reuses that complete result until blank evidence resets
+the decision; new/added or substituted characters still trigger another call.
+For Python crops, centered rows merge their horizontal bounds with overlapping
+unrestricted detections to retain split/faint ends without admitting unrelated rows.
+The extension selects Chinese rows from those same Paddle readings and crops with
+safety margins (two row heights horizontally, half a row vertically, clipped before
+neighboring rows). It trims near-black padding, excludes English rows and unused
+width, and stacks Chinese rows without rescaling or duplicating overlapping padding.
+Only that original-color crop is sent, with raw Paddle text in a separate
+UTF-8/base64 diagnostic header (4000-character maximum). Python no longer loads or
+runs Paddle in default mode; it applies a light luminance sharpening pass before
+the VLM (changes capped at 12/255, no binarization or morphology);
+the extension's stronger detection mask is never sent as recognition input.
+Qwen3-VL-2B then reads the lightly enhanced color pixels and translates
+them with context in **one call**. Paddle text is displayed/logged by Python only,
+never added to the VLM prompt or substituted for the final transcription.
+Automatic selection can still miss a row; the
+padding reduces clipping but cannot guarantee recognition. VLM confidence and
+character boxes are unavailable; minimum confidence does not apply.
+Centre filtering applies to the extension's row detection.
+Color and outline tuning guide pre-cropping. Debug shows green source
+regions and actual VLM input dimensions. Select **Python local bridge** for both
+OCR engine and Translator, copy the app's token into Settings, and click
+**Test Python connection**. The default endpoint is `http://127.0.0.1:8765`;
+only loopback HTTP is allowed. The token is stored locally, not in Chrome Sync.
+Python returns OCR and translation together; the translation is reused when the
+existing subtitle scheduler asks for it. The exact bundled translation travels
+with its matching OCR text through subtitle stabilization and is applied directly
+to the overlay/history; evolving dialogue context cannot cause a second
+`/translate` request for that result. Other translators still use their own path.
+When Python OCR has already returned a nonempty translation and Python
+is the selected translator, the 350 ms OCR translation-settling wait is bypassed.
+Subtitle stabilization, correction handling and stale-result checks still apply;
+other OCR/translator combinations retain their existing settling behavior.
+Native-track text can also use the Python
+translator. English targets only; Tesseract dictionary glyph correction does not
+apply. Native text uses the same loaded Qwen3-VL-2B in text-only mode.
+It receives the same shared dialogue instructions, up to eight earlier subtitle
+lines from this episode's last three minutes, and the optional title, description
+and Wikipedia synopsis used by Gemini Nano. Names and spellings included in that
+background are available to the model; it does not invent an episode recap or a
+character list. Enable **Use earlier dialogue** and **Use video background as story
+context** in Translation settings. Both OCR+translation and native-track requests
+carry the context; cache identities include the background, preceding lines and
+instructions, so a text-only OPUS result cannot override Qwen. Python history
+translations are re-evaluated after a page reload rather than importing older
+context-free results. If another translator is selected it still runs
+normally, rather than displaying Python's English translation. No silent fallback
+occurs if the app is unavailable. Python permits one OCR request in flight per
+content context; saturated ticks are skipped before capture rather than queuing
+old frames. Server-wide busy responses skip a frame. Debug logs show server and
+round-trip timing. The companion uses Qwen3-VL-2B Q4_K_M with a 230-token visual
+budget (approximately 20% above the previous 192) and an English JSON grammar
+that excludes Han characters, without replacing names after generation. It
+puts all instructions/dialogue before the image for prefix-cache reuse.
+On the tested RTX 2070, changing synthetic Qwen3 subtitles took roughly 282-325 ms
+after the first prefix evaluation (436 ms); changed frames with prefix caching
+disabled took 359-379 ms. These exclude Chrome Paddle/cropping, capture and display.
+**Sub-500 ms is not guaranteed**. The visual budget can lose
+detail on untested long/faint lines. Contextual text-only
+translation is much faster. Restart Python after downloading the vision weights
+and projector with `--prepare`.
+
+Python-mode direct video capture checks every 100 ms (higher CPU/GPU use), still
+with one request in flight and unchanged-frame skipping. Screenshot fallback keeps
+its >=500 ms rate limit; other OCR engines retain their configured interval.
+Info-level `Python latency summary` logs report rolling means and p95 over the
+last 30 displayed translations: capture-to-display, capture-to-OCR, Python geometry,
+OCR, translation, total server processing and bridge round trip. Replay without a
+new frame is excluded; samples reset with subtitle state. Capture-to-display starts
+at frame acquisition, not the unknown instant subtitles first appear in the video.
+In single-pass mode, Python geometry covers decoding/light preprocessing (Paddle
+cropping now runs in Chrome), OCR includes both VLM
+transcription and translation, and the separate translation stage is zero.
+
+The Python HTTP hop sends binary PNG/JPEG crops rather than JSON/base64 images
+(extension-internal messages still use data URLs). Restart the updated Python app
+as well as reloading Chrome; connection testing checks binary-transfer and
+context-aware Qwen support. UTF-8 context travels in a base64 header alongside
+the binary image (up to eight 500-character lines and 4000 background characters).
+Python caches up to 32 exact received-crop results, keyed also by the
+story, preceding dialogue and instructions. Changed pixels or context invalidate
+the result cache. Debug output identifies single-pass VLM mode. The companion retains
+`--ocr-engine paddle` as an explicit legacy mode; only that mode uses detected-line
+crops, faint-stroke geometry recovery and confidence filtering.
+
+Chrome native OCR (`TextDetector`) is no longer offered in Settings. Opening
+Settings with that saved selection switches it to PaddleOCR and displays a notice.
+
+**Chrome Prompt API image OCR (Gemma/Nano, experimental):** this is a separate OCR engine, not `TextDetector`. Select it under OCR engine and click **Download OCR model** in Settings to check image input support and, if needed, download the model with a user gesture. Use the image test buttons below to test real inference. Translation's **Prepare model** button is separate. Chrome selects the actual local model; installing `gemma4_component`, Nano or an Optimization Guide manifest does not prove image OCR is available. Prompt API/image-input flags may be required depending on Chrome version; restart after changing flags. Missing support, unprepared models and failed recognition produce explicit errors, with no silent fallback to another OCR engine.
+
+For live Prompt API OCR, Paddle selects Chinese rows, crops their original-color
+pixels and suppresses repeated subtitles using the same gate as the Python path.
+Chrome reads that crop and returns Chinese plus English in one call, with output
+languages undeclared. Choose **Gemini Nano** as translator to use the bundled
+English directly; other selected translators still translate the returned Chinese.
+Dictionary, pinyin and history use Chrome's Chinese transcription. Local Paddle
+assets are required. Each frame clones a reusable base session and releases the
+clone. Paddle recognition uses the configured enhancement (or binary threshold);
+the vision model still receives the original-color crop. Only Python bridge mode
+bypasses browser enhancement before Paddle.
+This keeps prior images and answers out of the next frame. Episode background
+and dialogue are context only. No Python, API key or cloud inference is used.
+The model can still misread or hallucinate; confidence scores are unavailable.
+**PaddleOCR primary + Chrome vision fallback** instead uses Paddle text for normal
+rows and the selected text translator (Nano recommended).
+With Nano selected, accepted Paddle text is sent for translation immediately,
+without the usual 350 ms OCR settling wait. The previous translated subtitle can
+still remain visible for up to 500 ms while the next translation is prepared;
+it is replaced as soon as the new translation arrives. OCR corrections supersede
+older translation results, though an already-running request must finish first.
+The overlay groups distinct rapid dialogue within a one-second window; repeated
+text (including punctuation-only changes) replaces its earlier copy instead of
+duplicating the subtitle and translation.
+The side panel's **Captured frame** section adds a third preview of the exact
+original-color stacked crop. Green PASS marks accepted Paddle rows; red FALLBACK
+marks Paddle rejection routed to vision, and red REJECTED marks frames with no
+usable crop. Labels also identify reused results (the preview is the current crop,
+not a claim that inference reran). Empty/rejected frames clear the final preview.
+The first two previews remain the source band and detection overlay.
+Below the final crop, the panel shows Paddle's confidence (lowest selected row)
+and a separate cleaned-input preview shows enhanced Chinese rows cropped to
+their detected bounds without added margins, stacked before model
+resizing. Rejected frames with no selected rows clear this preview.
+Chrome Paddle receives these tight row bounds; safety margins remain only on
+the original-color vision crop. Python bridge Paddle input is unchanged.
+Optional outline enhancement adds at most 10% to the stroke map; a dark shadow
+is not required and unoutlined strokes are never penalized by that boost.
+Python bridge mode does not show a cleaned
+preview because it bypasses browser enhancement.
+The recognition details also include its raw reading, the final OCR engine's Chinese output, and bundled English when
+available. Vision confidence is not fabricated; unavailable scores are labelled.
+This mode uses
+Chrome vision
+only when a Chinese row has average confidence below 80% (or the configured
+minimum, if higher), any glyph below 50%, or a luminance 10th-to-90th percentile
+range below 32/255. Empty unreliable rows may also trigger vision. Vision replaces
+both Chinese and English on fallback; reliable rows avoid image inference.
+These are heuristics, not proof of white-on-white or black-on-black contamination:
+Empty Paddle readings require at least two separated glyph-sized column runs
+before vision fallback. Broad artwork or scattered noise is rejected instead of
+being sent to vision. This conservative gate can also miss heavily merged or
+single-character subtitles when Paddle reads nothing.
+confident mistakes and completely undetected rows can still be missed. Repeated
+Paddle readings reuse results until a blank/reset or changed reading/settings.
+Chrome vision limits context to the last two dialogue lines (200 characters each)
+and the first 800 characters of video background, reducing repeated prompt work.
+This can lose names/details later in a synopsis; Python and text-only translators
+retain their existing context limits.
+Chrome vision failures report the failing stage, native error, raw model response,
+elapsed time, crop dimensions, source-band dimensions and preliminary Paddle text.
+Context diagnostics include counts only, not the full synopsis or earlier dialogue.
+
+**Inspect Prompt API capabilities** queries Chrome without creating sessions or
+starting downloads. The selectable report shows browser/API information, exact
+options and raw availability for default text, English/Chinese input and output,
+image input with English or Chinese output, and the actual OCR configuration.
+Native exception names/messages and sampling parameters are retained, so an
+unsupported Chinese declaration can be distinguished from image-input support.
+Availability alone does not establish OCR accuracy. Chrome may expose additional
+internal model diagnostics at `chrome://on-device-internals`.
+
+**Test image → English** performs real inference using image input and English
+output declarations only, independently of Chinese-output OCR availability. It
+sends a generated Chinese image (not its text or expected answer in the prompt),
+shows the raw model response, expected meaning and elapsed time, and releases the
+session. It does not download models or change the selected OCR engine.
+
+**Test image → Chinese + English** uses the same sample but leaves output
+languages undeclared and requests Chinese transcription plus English translation
+as JSON. It checks Chinese against the sample and displays the raw response for
+English accuracy review. Plain JSON and JSON wrapped in a Markdown code fence are
+accepted; extra commentary and malformed JSON remain errors.
+Single-item arrays wrapping the bilingual object are also accepted. Live vision
+requests constrain output to one object with exactly two string fields;
+multi-item arrays are not silently merged or truncated.
+Live vision explicitly requests pinyin/established English character names and
+constrains the English field to exclude common Han character ranges. Runtime
+validation still rejects mixed-Chinese English rather than displaying it.
+This experimental test does not change live OCR routing.
+
 | Group | Settings |
 |---|---|
-| Translation | translator (Chrome / Opus-MT / Ollama / DeepL), target language, DeepL key + plan, Ollama URL + model, story context, cache clear |
+| Translation | translator (Gemini Nano / Python local bridge / Chrome / DeepL), target language, DeepL key + plan, story context, cache clear |
 | OCR | language (`chi_sim`, `chi_tra`, both), capture interval, crop band (top/bottom %), brightness threshold, subtitle color, min confidence, stable frames |
 | Appearance | font sizes, position (above OCR band / top / below video, or dragged), show pinyin / translation, blur band for burned-in subtitles (strength, width) |
 | Behaviour | hover vs. click, pause on hover, key bindings |

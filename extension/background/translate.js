@@ -1,6 +1,7 @@
 import { deeplTranslate } from './deepl.js';
 import { storyTag } from './story-context.js';
 import { dialogueSystemPrompt, dialogueUserMessage, cleanLlmOutput } from '../shared/dialogue-prompt.js';
+import { pythonTranslate } from './python-bridge.js';
 
 const CACHE_PREFIX = 'tr:';
 const PROMPT_VERSION = 8;
@@ -57,6 +58,7 @@ export async function translate(text, settings, toOffscreen, context = [], story
 
 async function translateRaw(text, settings, toOffscreen, context = [], story = '') {
   const { translator, targetLang } = settings;
+  if (translator === 'python') return pythonTranslate(text, settings, context, story);
   const llm = LLM.has(translator);
   const useStory = llm && settings.storyContext && story ? story : '';
   const base = translator === 'ollama' ? `ollama/${settings.ollamaModel}` : translator;

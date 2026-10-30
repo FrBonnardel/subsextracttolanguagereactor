@@ -103,14 +103,13 @@ export function textMap(gray, w, h, strokeRadius, edgeBoost, color = 'white') {
   for (let i = 0; i < map.length; i++) map[i] = 0.85 * th[i] + 0.15 * gs[i] * (th[i] / 255);
 
   if (edgeBoost) {
-    // Dark outlines/shadows around subtitles: black top-hat (closing − gray). Strokes next to an outline are
-    // strengthened, bright areas without an outline are damped. Mild factors so strokes don't thicken.
+    // Optional outline evidence adds a small boost; unoutlined strokes are never penalized.
     const closed = erode(dilate(gray, w, h, strokeRadius), w, h, strokeRadius);
     const bt = new Uint8ClampedArray(gray.length);
     for (let i = 0; i < gray.length; i++) bt[i] = closed[i] - gray[i];
     const outline = dilate(stretch(bt, percentile(bt, 0.5), Math.max(percentile(bt, 0.995), 24)), w, h, Math.max(1, strokeRadius >> 1));
     // Boost only (never damp, never re-normalise): faint outlined strokes gain, full-strength cores are unchanged.
-    for (let i = 0; i < map.length; i++) map[i] = map[i] * (1 + 0.25 * (outline[i] / 255));
+    for (let i = 0; i < map.length; i++) map[i] = map[i] * (1 + 0.1 * (outline[i] / 255));
   }
   return map;
 }
