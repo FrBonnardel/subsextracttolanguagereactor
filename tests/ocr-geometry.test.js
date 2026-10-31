@@ -3,7 +3,45 @@ import { readFileSync } from 'node:fs';
 import { inflateSync } from 'node:zlib';
 import test from 'node:test';
 import { findLines, removeNoise, expandLineBounds, recoverFaintRows, refineLineBounds } from '../extension/offscreen/ocr-geometry.js';
-import { geometryMask } from '../extension/offscreen/preprocess.js';
+import { geometryMask, textMap } from '../extension/offscreen/preprocess.js';
+
+test('supplied five-character subtitle recovers a full row before horizontal cleanup', () => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/subtitle-split-row.json', import.meta.url), 'utf8'));
+  const { width: w, height: h } = fixture;
+  const gray = inflateSync(Buffer.from(fixture.gray, 'base64'));
+  assert.equal(gray.length, w * h);
+  for (const edgeBoost of [false, true]) {
+    const map = textMap(gray, w, h, Math.round(h / 20), edgeBoost, 'white');
+    for (const centeredOnly of [false, true]) {
+      const strong = geometryMask(map);
+      const faint = Uint8Array.from(map, (value) => value > 40 ? 1 : 0);
+      removeNoise(strong, w, h);
+      removeNoise(faint, w, h);
+      const fragments = findLines(strong, w, h, centeredOnly);
+      assert.equal(fragments.length, 2, 'Strong strokes split one glyph row vertically');
+      const expanded = expandLineBounds(fragments, findLines(faint, w, h, centeredOnly));
+      assert.equal(expanded.length, 1, 'Faint evidence restores one full-height row');
+      const [line] = refineLineBounds(expanded, faint, w, centeredOnly);
+      assert.ok(line.x0 <= 287 && line.x1 >= 432, JSON.stringify(line));
+      assert.ok(line.y0 <= 32 && line.y1 >= 59, JSON.stringify(line));
+      assert.ok(line.x0 >= 265 && line.x1 <= 455, 'Clothing stays outside the cleaned crop');
+    }
+  }
+});
+
+test('fragment recovery does not merge separate rows or accept oversized faint artwork', () => {
+  const fragments = [
+    { x0: 100, y0: 20, x1: 200, y1: 35 },
+    { x0: 120, y0: 36, x1: 190, y1: 45 },
+  ];
+  assert.deepEqual(expandLineBounds(fragments, [
+    { x0: 0, y0: 0, x1: 500, y1: 100 },
+  ]), fragments);
+  const separate = [fragments[0], { ...fragments[1], y0: 45, y1: 60 }];
+  assert.deepEqual(expandLineBounds(separate, [
+    { x0: 95, y0: 18, x1: 205, y1: 62 },
+  ]), separate);
+});
 
 test('recovers the entirely missing Chinese row in the supplied time-question frame', () => {
   const fixture = JSON.parse(readFileSync(new URL('./fixtures/subtitle-missing-row.json', import.meta.url), 'utf8'));
@@ -67,6 +105,44 @@ test('faint bounds cannot introduce new lines or expand a subtitle into a large 
 function rectangle(mask, w, x0, y0, x1, y1) {
   for (let y = y0; y < y1; y++) mask.fill(1, y * w + x0, y * w + x1);
 }
+
+test('supplied subtitle retains the sparse horizontal glyph and final character during cleanup', () => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/subtitle-sparse-ending.json', import.meta.url), 'utf8'));
+  const { width: w, height: h } = fixture;
+  const gray = inflateSync(Buffer.from(fixture.gray, 'base64'));
+  assert.equal(gray.length, w * h);
+  for (const edgeBoost of [false, true]) {
+    const map = textMap(gray, w, h, Math.round(h / 20), edgeBoost, 'white');
+    const strong = geometryMask(map);
+    const faint = Uint8Array.from(map, (value) => value > 40 ? 1 : 0);
+    for (const mask of [strong, faint]) removeNoise(mask, w, h);
+    for (const centeredOnly of [false, true]) {
+      const lines = expandLineBounds(findLines(strong, w, h, centeredOnly), findLines(faint, w, h, centeredOnly));
+      assert.equal(lines.length, 1);
+      const [line] = refineLineBounds(lines, faint, w, centeredOnly);
+      assert.ok(line.x0 <= 277 && line.x1 >= 441, JSON.stringify(line));
+      assert.ok(line.x0 >= 260 && line.x1 <= 460, 'Keep the crop bounded around the subtitle');
+      assert.ok(line.y0 <= 33 && line.y1 >= 59, JSON.stringify(line));
+    }
+  }
+});
+
+test('density cleanup bridges one sparse glyph but not distant artwork on either side', () => {
+  const w = 600;
+  for (const mirrored of [false, true]) {
+    const mask = new Uint8Array(w * 80);
+    const draw = (x0, y0, x1, y1) => rectangle(mask, w,
+      mirrored ? w - x1 : x0, y0, mirrored ? w - x0 : x1, y1);
+    draw(220, 25, 300, 45);
+    draw(305, 34, 329, 36);
+    draw(340, 25, 350, 45);
+    draw(110, 25, 130, 45);
+    draw(470, 25, 490, 45);
+    const [line] = refineLineBounds([{ x0: 90, y0: 20, x1: 510, y1: 50 }], mask, w, true);
+    assert.ok(line.x0 <= (mirrored ? 250 : 220) && line.x1 >= (mirrored ? 380 : 350), JSON.stringify(line));
+    assert.ok(line.x0 > 130 && line.x1 < 470, 'Distant artwork must remain excluded');
+  }
+});
 
 test('refines the supplied reading subtitle without clothing and tableware artwork', () => {
   const fixture = JSON.parse(readFileSync(new URL('./fixtures/subtitle-reading-artwork.json', import.meta.url), 'utf8'));

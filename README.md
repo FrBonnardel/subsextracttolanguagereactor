@@ -106,6 +106,11 @@ sequenceDiagram
 
 Enhanced mode also uses a weaker stroke mask to expand existing line boxes within bounded dimensions. This preserves faint Chinese glyphs on light backgrounds beside stronger glyphs, without adding lines found only by the weak mask. PaddleOCR still recognizes the original colour pixels inside those boxes.
 
+When strong strokes split one subtitle into vertical fragments, a bounded faint
+row rejoins fragments separated by at most three pixels before horizontal
+cleanup. This preserves full glyph height and spaced leading characters without
+merging separate subtitle rows or accepting oversized background artwork.
+
 For bilingual subtitles, a further low-contrast fallback can recover an entirely missing centred row below an existing subtitle. Candidates must be nearby and of comparable height, with bounded width; recovered strokes also participate in frame-change detection. This is a geometry heuristic, not a guarantee of correct recognition.
 
 OCR revision matching is restricted to one second and requires an ordered near-match or an expansion containing the previous text. Merely sharing characters or words does not merge separate dialogue lines. Native subtitle lines are not treated as OCR corrections.
@@ -287,6 +292,9 @@ stroke density, excluding sparse neighbouring artwork instead of widening to
 all text-like pixels on the row. Margins scale with detected row height and are
 kept small for the original-color vision crop. Off-centre mode retains separated
 text blocks; Python bridge cropping is unchanged.
+Horizontal cleanup uses the same 1.5-glyph gap tolerance as line detection, so
+low-density glyphs such as a single horizontal stroke do not disconnect the
+following characters from their subtitle. Wider gaps still separate artwork.
 Following the detection-before-recognition and repeated-frame filtering approach
 used by [VSE](https://github.com/YaoFANGUK/video-subtitle-extractor), Chrome paths
 compare full-resolution subtitle-row masks before running Paddle. Identical
@@ -298,6 +306,11 @@ result even if a subsequent Paddle confidence/contrast check drops, avoiding
 redundant vision calls. Changed Hanzi still use the normal fallback gate.
 Debug messages distinguish skipped Paddle inference from text-result reuse.
 This is a browser-native adaptation, not VSE's Python detector or VideoSubFinder.
+Live Chrome Vision calls have a 10-second total deadline covering session
+creation, cloning and image inference. On timeout, the extension sends an abort
+signal, destroys the active and cached sessions and releases the OCR queue.
+The next frame can create a fresh session; page-side OCR timeouts are also
+reported explicitly instead of silently discarding the result.
 Optional outline enhancement adds at most 10% to the stroke map; a dark shadow
 is not required and unoutlined strokes are never penalized by that boost.
 Python bridge mode does not show a cleaned

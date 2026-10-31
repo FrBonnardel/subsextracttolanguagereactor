@@ -142,20 +142,62 @@ function sessionOptions() {
   };
 }
 
-export async function createPromptOcrSession({ download = false, monitor } = {}) {
+export async function createPromptOcrSession({ download = false, monitor, signal } = {}) {
   const api = globalThis.LanguageModel;
   if (typeof api?.availability !== 'function' || typeof api?.create !== 'function') {
     throw new Error('Chrome Prompt API image OCR is unavailable. Enable the Prompt API and image input if offered in chrome://flags, then restart Chrome. Flag names and support vary by Chrome version; TextDetector is unrelated.');
   }
   const options = sessionOptions();
   const availability = await api.availability(options);
+  signal?.throwIfAborted();
   if (availability === 'unavailable') {
     throw new Error('Chrome Prompt API image OCR is unsupported on this device or build (image input is required). Output languages are undeclared. Select PaddleOCR instead.');
   }
   if (availability !== 'available' && !download) {
     throw new Error(`Chrome Prompt API OCR model is ${availability}. ${PREPARE_HINT}`);
   }
-  return api.create({ ...options, ...(monitor ? { monitor } : {}) });
+  return api.create({ ...options, ...(monitor ? { monitor } : {}), ...(signal ? { signal } : {}) });
+}
+
+const OCR_TIMEOUT_MS = 10_000;
+
+async function promptWithDeadline(ocr, messages, responseConstraint, onStage = () => {}) {
+  const controller = new AbortController();
+  const { signal } = controller;
+  let session;
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new DOMException('Chrome vision exceeded 10 seconds; inference cancelled.', 'TimeoutError');
+      reject(error);
+      controller.abort(error);
+    }, OCR_TIMEOUT_MS);
+  });
+  const work = async () => {
+    if (!ocr.base) {
+      const base = await createPromptOcrSession({ signal });
+      if (signal.aborted) {
+        base.destroy();
+        signal.throwIfAborted();
+      }
+      ocr.base = base;
+    }
+    onStage('session cloning');
+    const clone = await ocr.base.clone();
+    if (signal.aborted) {
+      clone.destroy();
+      signal.throwIfAborted();
+    }
+    session = clone;
+    onStage('image inference');
+    return session.prompt(messages, { responseConstraint, signal });
+  };
+  try {
+    return await Promise.race([work(), timeout]);
+  } finally {
+    clearTimeout(timer);
+    session?.destroy();
+  }
 }
 
 const RESPONSE_SCHEMA = {
@@ -168,22 +210,17 @@ const RESPONSE_SCHEMA = {
 export class PromptOcr {
   async recognizeBilingual(source, { context = [], story = '' } = {}) {
     ({ context, story } = compactVisionContext({ context, story }));
-    let session;
     let response;
     let stage = 'session creation';
     const started = performance.now();
     try {
-      this.base ??= await createPromptOcrSession();
-      stage = 'session cloning';
-      session = await this.base.clone();
-      stage = 'image inference';
-      response = await session.prompt([{
+      response = await promptWithDeadline(this, [{
         role: 'user',
         content: [
           { type: 'text', value: `Read all Chinese subtitle rows top to bottom and translate them. Return only JSON with chinese and english strings. In english, romanize personal names in pinyin or use their supplied English spelling; never leave Chinese characters. Context only: ${JSON.stringify({ story, context })}` },
           { type: 'image', value: source },
         ],
-      }], { responseConstraint: BILINGUAL_SCHEMA });
+      }], BILINGUAL_SCHEMA, (value) => { stage = value; });
       stage = 'JSON parsing';
       const data = parseBilingualImageResponse(response);
       stage = 'response validation';
@@ -209,8 +246,6 @@ export class PromptOcr {
         })}`,
         { cause: e },
       );
-    } finally {
-      session?.destroy();
     }
   }
 
@@ -220,12 +255,9 @@ export class PromptOcr {
   }
 
   async recognize(source, centeredOnly = true) {
-    let session;
     try {
-      this.base ??= await createPromptOcrSession();
       // Each frame starts without previous images or answers in its context.
-      session = await this.base.clone();
-      const response = await session.prompt([{
+      const response = await promptWithDeadline(this, [{
         role: 'user',
         content: [
           {
@@ -236,7 +268,7 @@ export class PromptOcr {
           },
           { type: 'image', value: source },
         ],
-      }], { responseConstraint: RESPONSE_SCHEMA });
+      }], RESPONSE_SCHEMA);
       const result = JSON.parse(response);
       if (!result || !Array.isArray(result.lines) || result.lines.some((line) => typeof line !== 'string')) {
         throw new Error('Invalid OCR response: expected a JSON object with a lines array of strings.');
@@ -245,8 +277,6 @@ export class PromptOcr {
     } catch (e) {
       this.destroy();
       throw new Error(`Chrome Prompt API image OCR failed: ${e.message}. ${PREPARE_HINT}`, { cause: e });
-    } finally {
-      session?.destroy();
     }
   }
 }

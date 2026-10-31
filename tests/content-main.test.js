@@ -123,6 +123,25 @@ test('only Python direct capture uses 100 ms; screenshots and other engines keep
   assert.equal([...h.timers.values()].at(-1).ms, 250);
 });
 
+test('OCR page deadline logs an explicit error, releases capture and clears successful timers', async () => {
+  const h = await harness();
+  h.api.setVideo(video());
+  h.api.setupCapture('paddle-vision');
+  h.context.chrome.runtime.sendMessage = () => new Promise(() => {});
+  const capture = h.api.captureOnce();
+  const [id, timer] = [...h.timers].find(([, timer]) => timer.ms === 10000);
+  h.timers.delete(id);
+  timer.fn();
+  await capture;
+  assert.ok(h.logs.some((args) => args[0] === 'warn' && args.some((arg) =>
+    typeof arg === 'string' && arg.includes('OCR request timed out after 10 seconds'))));
+  assert.ok(h.logs.some((args) => args.some((arg) =>
+    typeof arg === 'string' && arg.includes('error – OCR request timed out'))));
+  h.context.chrome.runtime.sendMessage = async () => ({ error: 'Test OCR error' });
+  await h.api.captureOnce();
+  assert.equal([...h.timers.values()].filter((timer) => timer.ms === 10000).length, 0);
+});
+
 test('Python captures and translation jobs receive the existing episode story and preceding dialogue', async () => {
   const h = await harness();
   h.api.setVideo(video());

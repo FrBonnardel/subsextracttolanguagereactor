@@ -293,7 +293,20 @@
     }
   }
 
-  const withTimeout = (p, ms) => Promise.race([p, new Promise((r) => setTimeout(() => r(null), ms))]);
+  async function withTimeout(p, ms) {
+    let timer;
+    try {
+      return await Promise.race([p, new Promise((resolve) => {
+        timer = setTimeout(() => {
+          const error = `OCR request timed out after ${ms / 1000} seconds.`;
+          log('warn', error);
+          resolve({ error });
+        }, ms);
+      })]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   /**
    * Snaps a frame and queues it for OCR without waiting for earlier frames to finish, so the next

@@ -5,6 +5,95 @@ import vm from 'node:vm';
 import { createPromptOcrSession, inspectPromptCapabilities, testImageToEnglish, testImageToBilingual, parseBilingualImageResponse, compactVisionContext, PromptOcr } from '../extension/offscreen/prompt-ocr.js';
 import '../extension/shared/defaults.js';
 
+test('live vision stops at exactly 10 seconds, releases the OCR queue and cleans up late sessions', async () => {
+  const source = await readFile(new URL('../extension/offscreen/prompt-ocr.js', import.meta.url), 'utf8');
+  const engineSource = await readFile(new URL('../extension/offscreen/ocr.js', import.meta.url), 'utf8');
+  for (const method of ['recognize', 'recognizeBilingual']) {
+    for (const stalledStage of ['availability', 'creation', 'cloning', 'inference']) {
+      let now = 0;
+      let nextTimer = 0;
+      const timers = new Map();
+      let finishStalled;
+      let requestSignal;
+      let creationSignal;
+      let baseDestroyed = 0;
+      let cloneDestroyed = 0;
+      let stall = true;
+      const stalled = new Promise((resolve) => { finishStalled = resolve; });
+      const clone = {
+        prompt(_messages, { signal }) {
+          requestSignal = signal;
+          if (stall && stalledStage === 'inference') return stalled;
+          return Promise.resolve(method === 'recognize'
+            ? '{"lines":["你好"]}' : '{"chinese":"你好","english":"Hello"}');
+        },
+        destroy() { cloneDestroyed++; },
+      };
+      const base = {
+        clone: () => stall && stalledStage === 'cloning' ? stalled : Promise.resolve(clone),
+        destroy() { baseDestroyed++; },
+      };
+      const context = vm.createContext({
+        AbortController, DOMException,
+        performance: { now: () => now },
+        setTimeout(fn, ms) { const id = ++nextTimer; timers.set(id, { fn, deadline: now + ms }); return id; },
+        clearTimeout(id) { timers.delete(id); },
+        chrome: { runtime: { getURL: (path) => path } },
+        LanguageModel: {
+          availability: () => stall && stalledStage === 'availability' ? stalled : Promise.resolve('available'),
+          create({ signal }) {
+            creationSignal = signal;
+            return stall && stalledStage === 'creation' ? stalled : Promise.resolve(base);
+          },
+        },
+      });
+      vm.runInContext(source.replace(/export (async )?function /g, '$1function ')
+        .replace('export class PromptOcr', 'globalThis.PromptOcr = class PromptOcr'), context);
+      vm.runInContext(engineSource.replace(/^import .*;\r?\n/gm, '').replace(/export function /g, 'function ')
+        .replace('export class OcrEngine', 'globalThis.OcrEngine = class OcrEngine'), context);
+      const ocr = new context.PromptOcr();
+      const engine = Object.create(context.OcrEngine.prototype);
+      engine.queue = Promise.resolve();
+      engine._process = () => ocr[method]({ width: 200, height: 40 });
+      const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
+      let completed = false;
+      const first = engine.process({});
+      const rejected = assert.rejects(first, /exceeded 10 seconds/);
+      first.then(() => { completed = true; }, () => { completed = true; });
+      await flush();
+      assert.equal(timers.size, 1);
+      now = 9999;
+      assert.equal([...timers.values()][0].deadline, 10000);
+      assert.equal(completed, false, `${method}/${stalledStage} must not stop before the deadline`);
+      now = 10000;
+      [...timers.values()][0].fn();
+      await rejected;
+      assert.equal(completed, true);
+      assert.equal(timers.size, 0);
+      if (creationSignal) assert.equal(creationSignal.aborted, true);
+      if (requestSignal) {
+        assert.equal(requestSignal.aborted, true, 'Send STOP to the active model prompt');
+        assert.equal(cloneDestroyed, 1, 'Destroy even when the prompt ignores STOP');
+      }
+      const destroyedBeforeRetry = baseDestroyed;
+      if (['cloning', 'inference'].includes(stalledStage)) assert.equal(destroyedBeforeRetry, 1);
+      stall = false;
+      const second = await engine.process({});
+      assert.equal(method === 'recognize' ? second.raw : second.text, '你好', 'The OCR queue must recover');
+      const freshBase = ocr.base;
+      const clonesBeforeLate = cloneDestroyed;
+      const basesBeforeLate = baseDestroyed;
+      finishStalled(stalledStage === 'creation' ? base : stalledStage === 'cloning' ? clone : 'available');
+      await flush();
+      assert.equal(ocr.base, freshBase, 'Late work must not overwrite the new session');
+      assert.equal(baseDestroyed, basesBeforeLate + (stalledStage === 'creation' ? 1 : 0));
+      assert.equal(cloneDestroyed, clonesBeforeLate + (stalledStage === 'cloning' ? 1 : 0));
+      assert.equal(timers.size, 0, 'Successful frames remove their deadline timer');
+      ocr.destroy();
+    }
+  }
+});
+
 test('Chrome vision context retains only two recent lines and a bounded background', () => {
   const result = compactVisionContext({
     context: ['old', 'older', 'a'.repeat(500), 'latest'],

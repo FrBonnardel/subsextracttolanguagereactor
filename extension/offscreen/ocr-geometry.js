@@ -21,7 +21,8 @@ export function refineLineBounds(lines, mask, w, centeredOnly = false) {
     }
     const threshold = Math.max(1, height * 0.08, peak * 0.2);
     const blocks = [];
-    const maxGap = Math.max(3, Math.round(height * 0.75));
+    // Sparse glyphs such as a single horizontal stroke can fall below the density threshold.
+    const maxGap = Math.max(3, Math.round(height * 1.5));
     for (let x = line.x0; x < line.x1; x++) {
       if (density[x] < threshold) continue;
       const last = blocks[blocks.length - 1];
@@ -63,7 +64,26 @@ export function recoverFaintRows(lines, faintLines, width) {
 
 /** Recover faint neighbouring strokes without accepting new lines from a weaker mask. */
 export function expandLineBounds(lines, faintLines) {
-  return lines.map((line) => {
+  let merged = [...lines];
+  for (const faint of faintLines) {
+    const fragments = merged.filter((line) => faint.y0 <= line.y0 && faint.y1 >= line.y1
+      && faint.x0 <= line.x0 && faint.x1 >= line.x1).sort((a, b) => a.y0 - b.y0);
+    if (fragments.length < 2
+      || fragments.some((line, index) => index && line.y0 - fragments[index - 1].y1 > 3)) continue;
+    const combined = {
+      x0: Math.min(...fragments.map((line) => line.x0)),
+      y0: Math.min(...fragments.map((line) => line.y0)),
+      x1: Math.max(...fragments.map((line) => line.x1)),
+      y1: Math.max(...fragments.map((line) => line.y1)),
+    };
+    const height = combined.y1 - combined.y0;
+    if (faint.y1 - faint.y0 > height * 1.6
+      || faint.x1 - faint.x0 > combined.x1 - combined.x0 + height * 8) continue;
+    // A strong mask can split a glyph row; assess faint bounds against its full height.
+    merged = merged.filter((line) => !fragments.includes(line));
+    merged.push(combined);
+  }
+  return merged.sort((a, b) => a.y0 - b.y0).map((line) => {
     const height = line.y1 - line.y0;
     const candidate = faintLines.find((faint) => {
       const overlapY = Math.min(line.y1, faint.y1) - Math.max(line.y0, faint.y0);
