@@ -4,6 +4,10 @@ A Chrome extension (Manifest V3) that reads **burned-in Chinese subtitles** from
 
 ## Quick start
 
+The runtime assets (`extension/vendor/` and `extension/data/cedict.json`) are committed, so a fresh clone works without any build step. Manifest V3 forbids loading remote JS/WASM, so ONNX Runtime, Tesseract and Transformers.js must ship inside the extension.
+
+To regenerate or upgrade those assets:
+
 ```bash
 npm install
 npm run setup          # Tesseract + PaddleOCR v4 (GPU) models, ONNX Runtime WebGPU, CC-CEDICT
@@ -14,7 +18,7 @@ npm run setup          # Tesseract + PaddleOCR v4 (GPU) models, ONNX Runtime Web
 2. The options page opens. Pick a translator (see below) and click **Prepare model** or **Test translation**.
 3. Play a video with hardcoded Chinese subtitles. Hover a word to see its dictionary card.
 
-Requires Node 18 or later (for the built-in `fetch`).
+Requires Node 18 or later for `npm run setup` (built-in `fetch`).
 
 ## Translators
 
