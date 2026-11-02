@@ -93,6 +93,7 @@ The companion project (`F:\GitHub\hanzi-to-subtitle-vlm`) provides a status wind
 
 **Line detection** (`offscreen/ocr-geometry.js`):
 - Text-dense rows are isolated so sparse background artwork does not stretch a subtitle box. The density threshold is relative to each row group's peak, so short subtitles work too.
+- If no subtitle is found (or only off-centre artwork is detected), a five-row density average retries detection to preserve thin glyphs without lowering the pixel threshold.
 - Enhanced mode expands existing line boxes with a weaker stroke mask (bounded size) to keep faint glyphs on light backgrounds; it never adds lines found only by the weak mask.
 - When strong strokes split one subtitle into vertical fragments (≤3 px apart), a bounded faint row rejoins them before horizontal cleanup.
 - For bilingual subtitles, a low-contrast fallback can recover a missing centred row below an existing subtitle (nearby, comparable height, bounded width).

@@ -145,6 +145,18 @@ export function removeNoise(mask, w, h) {
 
 // Horizontal projection -> text line boxes (tight, in band coordinates).
 export function findLines(mask, w, h, centeredOnly = false) {
+  const lines = projectLines(mask, w, h, centeredOnly, false);
+  const onlyOffCenter = lines.length > 0 && !lines.some((line) =>
+    Math.abs((line.x0 + line.x1) / 2 - w / 2) <= w * CENTER_TOLERANCE);
+  if (lines.length && !onlyOffCenter) return lines;
+  // Thin glyphs can leave only short density peaks; retry without those sharp peaks.
+  const recovered = projectLines(mask, w, h, centeredOnly || onlyOffCenter, true);
+  return [...lines, ...recovered.filter((candidate) =>
+    !lines.some((line) => candidate.y0 < line.y1 && candidate.y1 > line.y0))]
+    .sort((a, b) => a.y0 - b.y0);
+}
+
+function projectLines(mask, w, h, centeredOnly, smooth) {
   const rows = new Int32Array(h);
   for (let y = 0; y < h; y++) {
     for (let x = 0, p = y * w; x < w; x++, p++) rows[y] += mask[p];
@@ -158,11 +170,18 @@ export function findLines(mask, w, h, centeredOnly = false) {
       // Sparse artwork can bridge the entire band. Find text-dense rows relative to
       // this run's peak, not the image width, so short subtitles still qualify.
       let peak = 0;
-      for (let row = start; row < y; row++) peak = Math.max(peak, rows[row]);
+      const density = (row) => {
+        if (!smooth) return rows[row];
+        let sum = 0;
+        const top = Math.max(start, row - 2), bottom = Math.min(y, row + 3);
+        for (let k = top; k < bottom; k++) sum += rows[k];
+        return sum / (bottom - top);
+      };
+      for (let row = start; row < y; row++) peak = Math.max(peak, density(row));
       const threshold = Math.max(2, Math.ceil(peak * 0.3));
       let denseStart = -1;
       for (let row = start; row <= y; row++) {
-        const dense = row < y && rows[row] >= threshold;
+        const dense = row < y && density(row) >= threshold;
         if (dense && denseStart < 0) denseStart = row;
         if (!dense && denseStart >= 0) {
           const prev = runs[runs.length - 1];

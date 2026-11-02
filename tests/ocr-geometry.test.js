@@ -5,6 +5,49 @@ import test from 'node:test';
 import { findLines, removeNoise, expandLineBounds, recoverFaintRows, refineLineBounds } from '../extension/offscreen/ocr-geometry.js';
 import { geometryMask, textMap } from '../extension/offscreen/preprocess.js';
 
+test('supplied thin-stroke subtitle survives vertical density filtering beside a corner logo', () => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/subtitle-sparse-rows.json', import.meta.url), 'utf8'));
+  const { width: w, height: h } = fixture;
+  const gray = inflateSync(Buffer.from(fixture.gray, 'base64'));
+  assert.equal(gray.length, w * h);
+  for (const edgeBoost of [false, true]) {
+    const map = textMap(gray, w, h, Math.round(h / 20), edgeBoost, 'white');
+    const strong = geometryMask(map);
+    const faint = Uint8Array.from(map, (value) => value > 40 ? 1 : 0);
+    for (const mask of [strong, faint]) removeNoise(mask, w, h);
+    const ink = strong.reduce((sum, value) => sum + value, 0) / strong.length;
+    assert.ok(ink >= 0.002 && ink <= 0.4, 'Pass the live OCR ink gate');
+    for (const centeredOnly of [false, true]) {
+      const lines = expandLineBounds(findLines(strong, w, h, centeredOnly), findLines(faint, w, h, centeredOnly));
+      const cleaned = refineLineBounds(lines, faint, w, centeredOnly);
+      const subtitle = cleaned.find((line) => line.x0 <= 305 && line.x1 >= 413 && line.y0 <= 33 && line.y1 >= 58);
+      assert.ok(subtitle, JSON.stringify(cleaned));
+      assert.ok(subtitle.x0 >= 280 && subtitle.x1 <= 440 && subtitle.y0 >= 25 && subtitle.y1 <= 65);
+      if (centeredOnly) assert.equal(cleaned.length, 1, 'Exclude the corner logo');
+    }
+  }
+});
+
+test('density retry rejects short peaks and keeps separated subtitle rows distinct', () => {
+  const w = 300, h = 100;
+  const mask = new Uint8Array(w * h);
+  for (const top of [15, 55]) {
+    for (let y = top; y < top + 24; y++) {
+      rectangle(mask, w, 148, y, 153, y + 1);
+    }
+    for (const offset of [1, 12, 22]) {
+      rectangle(mask, w, 130, top + offset, 170, top + offset + 1);
+    }
+  }
+  const lines = findLines(mask, w, h, true);
+  assert.equal(lines.length, 2);
+  assert.ok(lines[0].y1 < lines[1].y0);
+  const specks = new Uint8Array(w * h);
+  rectangle(specks, w, 140, 30, 160, 32);
+  rectangle(specks, w, 140, 50, 160, 52);
+  assert.deepEqual(findLines(specks, w, h, true), []);
+});
+
 test('supplied five-character subtitle recovers a full row before horizontal cleanup', () => {
   const fixture = JSON.parse(readFileSync(new URL('./fixtures/subtitle-split-row.json', import.meta.url), 'utf8'));
   const { width: w, height: h } = fixture;
