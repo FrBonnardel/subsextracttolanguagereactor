@@ -36,12 +36,48 @@ export function refineLineBounds(lines, mask, w, centeredOnly = false) {
     const selected = centeredOnly
       ? candidates.reduce((best, block) => distance(block) < distance(best) ? block : best)
       : { x0: candidates[0].x0, x1: candidates[candidates.length - 1].x1 };
+    const x0 = extendThinStroke(mask, w, line, selected.x0, -1);
+    const x1 = extendThinStroke(mask, w, line, selected.x1 - 1, 1) + 1;
     const padding = Math.max(2, Math.round(height * 0.2));
     return { ...line,
-      x0: Math.max(line.x0, selected.x0 - radius - padding),
-      x1: Math.min(line.x1, selected.x1 + radius + padding),
+      x0: Math.max(line.x0, Math.min(selected.x0 - radius, x0) - padding),
+      x1: Math.min(line.x1, Math.max(selected.x1 + radius, x1) + padding),
     };
   });
+}
+
+/**
+ * Leading/trailing glyphs made of one thin horizontal stroke (e.g. 一) fall below the density
+ * threshold. Accept one adjacent glyph-wide run of mid-height thin ink, nothing larger.
+ */
+function extendThinStroke(mask, w, line, edge, step) {
+  const height = line.y1 - line.y0;
+  const top = line.y0 + Math.round(height * 0.15);
+  const bottom = line.y1 - Math.round(height * 0.15);
+  const maxGap = Math.max(2, Math.round(height * 0.4));
+  const maxSpan = Math.round(height * 1.3);
+  const column = (x) => {
+    let ink = 0, outside = 0;
+    for (let y = line.y0; y < line.y1; y++) {
+      if (!mask[y * w + x]) continue;
+      if (y < top || y >= bottom) outside++;
+      else ink++;
+    }
+    return { ink, outside };
+  };
+  let x = edge + step;
+  let gap = 0;
+  while (x >= line.x0 && x < line.x1 && gap <= maxGap && !column(x).ink) { x += step; gap++; }
+  if (gap > maxGap || x < line.x0 || x >= line.x1) return edge;
+  let end = x;
+  let span = 0;
+  for (; x >= line.x0 && x < line.x1; x += step, span++) {
+    const { ink, outside } = column(x);
+    if (!ink && !outside) break;
+    if (outside || ink > Math.max(2, height * 0.2) || span >= maxSpan) return edge;
+    end = x;
+  }
+  return span >= height * 0.35 ? end : edge;
 }
 
 /** A faint second row may be absent from the strong mask in bilingual subtitles. */

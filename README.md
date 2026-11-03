@@ -98,6 +98,7 @@ The companion project (`F:\GitHub\hanzi-to-subtitle-vlm`) provides a status wind
 - When strong strokes split one subtitle into vertical fragments (≤3 px apart), a bounded faint row rejoins them before horizontal cleanup.
 - For bilingual subtitles, a low-contrast fallback can recover a missing centred row below an existing subtitle (nearby, comparable height, bounded width).
 - Horizontal refinement follows sustained stroke density and tolerates gaps up to 1.5 glyph heights (same as detection), so a low-density glyph such as `一` does not cut off the following characters; wider gaps still separate artwork.
+- A leading or trailing one-stroke glyph (e.g. `一`) is kept when it is a single glyph-wide, mid-height thin stroke next to the subtitle; longer rules and edge lines are not absorbed.
 - Optional outline enhancement adds at most 10% to the stroke map and never penalizes unoutlined strokes.
 - Paddle receives tight, enhanced row crops; vision models receive original-colour crops with small height-scaled margins.
 

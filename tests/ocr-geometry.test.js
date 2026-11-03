@@ -170,6 +170,38 @@ test('supplied subtitle retains the sparse horizontal glyph and final character 
   }
 });
 
+test('supplied subtitle keeps a leading one-stroke glyph during horizontal cleanup', () => {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/subtitle-leading-stroke.json', import.meta.url), 'utf8'));
+  const { width: w, height: h } = fixture;
+  const gray = inflateSync(Buffer.from(fixture.gray, 'base64'));
+  for (const edgeBoost of [false, true]) {
+    const map = textMap(gray, w, h, Math.round(h / 20), edgeBoost, 'white');
+    const strong = geometryMask(map);
+    const faint = Uint8Array.from(map, (value) => value > 40 ? 1 : 0);
+    for (const mask of [strong, faint]) removeNoise(mask, w, h);
+    for (const centeredOnly of [false, true]) {
+      const lines = expandLineBounds(findLines(strong, w, h, centeredOnly), findLines(faint, w, h, centeredOnly));
+      const subtitle = refineLineBounds(lines, faint, w, centeredOnly).find((line) => line.y0 >= 29);
+      assert.ok(subtitle.x0 <= 237 && subtitle.x1 >= 490, JSON.stringify(subtitle));
+      assert.ok(subtitle.x0 >= 220 && subtitle.x1 <= 505, 'Keep the crop bounded around the subtitle');
+    }
+  }
+});
+
+test('thin-stroke extension rejects long rules, edge strokes and distant strokes', () => {
+  const w = 600;
+  const build = (x0, x1, y0 = 33, y1 = 35) => {
+    const mask = new Uint8Array(w * 80);
+    rectangle(mask, w, 250, 20, 350, 50);
+    rectangle(mask, w, x0, y0, x1, y1);
+    return refineLineBounds([{ x0: 50, y0: 20, x1: 550, y1: 50 }], mask, w, true)[0];
+  };
+  assert.ok(build(220, 245).x0 <= 220, 'Adjacent glyph-wide stroke is kept');
+  assert.ok(build(100, 245).x0 > 200, 'Long horizontal rule is not absorbed');
+  assert.ok(build(220, 245, 47, 49).x0 > 220, 'Edge stroke (ground line) is not absorbed');
+  assert.ok(build(180, 205).x0 > 200, 'Distant stroke is not absorbed');
+});
+
 test('density cleanup bridges one sparse glyph but not distant artwork on either side', () => {
   const w = 600;
   for (const mirrored of [false, true]) {
