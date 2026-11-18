@@ -1,6 +1,6 @@
 import { OcrEngine } from './ocr.js';
 import { Dictionary } from './dictionary.js';
-import { translateLocal, warmupNano, keepaliveNano } from './translator.js';
+import { translateLocal, warmupNano, keepaliveNano, setNanoActive, setTranslatorVideoActive } from './translator.js';
 
 const log = (level, ...parts) => HSR_log(level, 'offscreen', ...parts);
 
@@ -13,6 +13,14 @@ dict.ready().then(
 );
 
 const handlers = {
+  async SET_VIDEO_ACTIVITY({ video, nano }) {
+    await Promise.all([
+      setNanoActive(!!nano),
+      setTranslatorVideoActive(!!video || !!nano),
+      ocr.setVideoActivity(!!video),
+    ]);
+    return { ok: true };
+  },
   OCR: (msg) => ocr.process(msg),
   async SEGMENT({ text }) {
     await dict.ready();

@@ -20,7 +20,10 @@ globalThis.LanguageModel = {
     };
   },
 };
-const { translateLocal, warmupNano, keepaliveNano, NANO_KEEPALIVE_IDLE_MS, isChineseQuestion } = await import('../extension/offscreen/translator.js');
+const {
+  translateLocal, warmupNano, keepaliveNano, setNanoActive, NANO_KEEPALIVE_IDLE_MS, isChineseQuestion,
+} = await import('../extension/offscreen/translator.js');
+await setNanoActive(true);
 const story = 'Video title: 全职法师';
 const nano = (text, context = []) => translateLocal({ provider: 'nano', text, from: 'zh', to: 'en', context, story });
 
@@ -105,4 +108,26 @@ test('Gemini Nano turning a statement into a question is asked once more to keep
 test('Chinese question detection', () => {
   for (const q of ['你还好吗', '你去哪', '为什么', '能不能走', '有没有人', '谁啊', '你呢', '怎么了', '真的？']) assert.ok(isChineseQuestion(q), q);
   for (const s of ['我能做好一个爸爸', '天黑之前应该可以赶到', '我不会倒在这', '现在是白天']) assert.ok(!isChineseQuestion(s), s);
+});
+
+test('deactivating video tabs destroys Nano sessions and prevents warmup', async () => {
+  let destroyed = 0;
+  const realCreate = LanguageModel.create;
+  LanguageModel.create = async (opts) => {
+    const session = await realCreate(opts);
+    return { ...session, destroy() { destroyed++; } };
+  };
+  try {
+    await warmupNano({ to: 'de', story: 'inactive lifecycle test' });
+    await setNanoActive(false);
+    assert.ok(destroyed > 0);
+    const count = created.length;
+    const result = await warmupNano({ to: 'de', story: 'inactive lifecycle test' });
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /inactive/);
+    assert.equal(created.length, count);
+  } finally {
+    await setNanoActive(true);
+    LanguageModel.create = realCreate;
+  }
 });

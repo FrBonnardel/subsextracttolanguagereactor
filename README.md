@@ -46,6 +46,7 @@ Optional HSK levels: add `extension/data/hsk.json` as `{ "爱": 1, "爱好": 2, 
 - Chrome built-in and DeepL are literal machine translators. The LLMs (Nano, Python Qwen) share a prompt (`shared/dialogue-prompt.js`) asking for the speaker's intended meaning as natural dialogue, without inventing plot details.
 - **Gemini Nano details:** one session (instructions + story background) is created when a video is found and reused. After each line, a clone pre-processes the next line's context in the background. Translations are shown whole, never streamed. If Nano answers in Chinese, or turns a statement into a question, it is asked once more; a second Chinese answer falls back to Chrome built-in.
 - **Keep the GPU ready during playback** (default on): sends a one-token prompt after ≥0.25 s idle (checked every 1 s) to reduce GPU wake-up latency. Real translations abort it; it stops when paused or hidden. Uses extra power; does not control clocks or fans.
+- GPU-backed OCR and translation sessions are released when no enabled, visible video tab needs them. Switching to a tab without an eligible video releases those resources; another eligible video tab keeps shared sessions available.
 - The logs show which translator produced each line (`Translate via …`).
 
 ## OCR engines

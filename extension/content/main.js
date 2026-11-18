@@ -184,6 +184,7 @@
       pausedThumb = null;
       resetLine();
       nativeReader.attach(video);
+      syncResourceActivity();
       if (video) {
         checkEpisode();
         log('info', `Tracking video ${video.videoWidth}x${video.videoHeight} (${video.currentSrc?.slice(0, 80) || 'no src'})`);
@@ -209,6 +210,16 @@
       if (/context invalidated/i.test(String(e))) shutdown();
       return null;
     });
+  }
+
+  let resourceActivity = '';
+  function syncResourceActivity() {
+    const videoActive = !!tracker.video && !document.hidden && enabledHere();
+    const nanoActive = videoActive && settings.translator === 'nano' && settings.showTranslation;
+    const state = `${videoActive}:${nanoActive}`;
+    if (state === resourceActivity) return;
+    resourceActivity = state;
+    send({ type: 'VIDEO_ACTIVITY', video: videoActive, nano: nanoActive });
   }
 
   // Events for the side panel (it filters by tab); no-op when no panel is listening.
@@ -749,7 +760,8 @@
 
   // Gemini Nano: build its session (system prompt + story) before the first subtitle needs it.
   function warmupTranslator() {
-    if (settings.translator !== 'nano' || !settings.showTranslation || !enabledHere()) return;
+    if (!tracker.video || document.hidden || settings.translator !== 'nano'
+        || !settings.showTranslation || !enabledHere()) return;
     const t0 = performance.now();
     send({ type: 'NANO_WARMUP', story: storyText() }).then((res) => {
       if (res?.ok) log('debug', `Gemini Nano warmed up in ${Math.round(performance.now() - t0)} ms`);
@@ -1089,6 +1101,7 @@
 
   function applyActive() {
     const on = visible && enabledHere();
+    syncResourceActivity();
     overlay.setVisible(on);
     nativeReader.setHideNative(on && settings.hideNativeSubs);
     if (!on) {
@@ -1151,6 +1164,10 @@
   }
 
   function shutdown() {
+    if (resourceActivity !== 'false:false') {
+      resourceActivity = 'false:false';
+      send({ type: 'VIDEO_ACTIVITY', video: false, nano: false });
+    }
     dead = true;
     clearTimeout(timer);
     resetLine();
@@ -1177,9 +1194,11 @@
   addEventListener('keydown', onKeyDown, true);
   document.addEventListener('fullscreenchange', () => tracker.video && overlay.mount(tracker.video));
   document.addEventListener('visibilitychange', () => {
+    syncResourceActivity();
     if (document.hidden) resetLine();
     else if (!dead) tick();
   });
+  syncResourceActivity();
   tracker.start();
   applyActive();
   schedule();

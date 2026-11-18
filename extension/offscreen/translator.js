@@ -75,6 +75,16 @@ export async function translateLocal({ provider, text, from, to, context = [], s
   throw new Error(`Unknown local translator: ${provider}`);
 }
 
+export async function setTranslatorVideoActive(active) {
+  if (active) return;
+  const translators = [...chromeTranslators.values()];
+  chromeTranslators.clear();
+  await Promise.all(translators.map(async (translatorPromise) => {
+    const translator = await translatorPromise.catch(() => null);
+    await translator?.destroy?.();
+  }));
+}
+
 let nanoFallbackLogged = false;
 
 function setupError(message) {
@@ -89,7 +99,18 @@ function setupError(message) {
 // so each line only pays for its own dialogue. Keyed by target language + story; only the latest few are kept.
 const nanoSessions = new Map(); // key -> Promise<base session>
 const MAX_NANO_SESSIONS = 2;
+let nanoEnabled = false;
+let nanoGeneration = 0;
+const activeNanoSessions = new Set();
+const destroyedNanoSessions = new WeakSet();
 export const NANO_OUTPUT_LANGS = ['en', 'es', 'ja'];
+
+function destroyNanoSession(session) {
+  if (!session || destroyedNanoSessions.has(session)) return;
+  destroyedNanoSessions.add(session);
+  activeNanoSessions.delete(session);
+  session.destroy();
+}
 
 export function nanoOptions(target, systemPrompt, story = '') {
   const system = story
@@ -103,9 +124,11 @@ export function nanoOptions(target, systemPrompt, story = '') {
 }
 
 function nanoBase(target, story) {
+  if (!nanoEnabled) return Promise.reject(setupError('Gemini Nano is inactive because no enabled video tab is visible.'));
   if (typeof LanguageModel === 'undefined') {
     return Promise.reject(setupError('Gemini Nano (Chrome Prompt API) unavailable in this browser – needs Chrome 138+.'));
   }
+  const generation = nanoGeneration;
   const key = `${target}\u0000${story}`;
   if (nanoSessions.has(key)) {
     const job = nanoSessions.get(key);
@@ -125,9 +148,14 @@ function nanoBase(target, story) {
     }
     try {
       const session = await LanguageModel.create(opts);
+      if (!nanoEnabled || generation !== nanoGeneration) {
+        destroyNanoSession(session);
+        throw setupError('Gemini Nano became inactive while the session was starting.');
+      }
       HSR_log('info', 'translator', `Gemini Nano session → ${target}${story ? ' with story context' : ''} ready in ${Math.round(performance.now() - t0)} ms`);
       return session;
     } catch (e) {
+      if (e.nanoSetup) throw e;
       // The ~2 GB model download needs a user gesture, which the offscreen document never has.
       throw setupError(`Gemini Nano not ready (${availability}): ${e.message} – click "Prepare model" in the options.`);
     }
@@ -137,7 +165,7 @@ function nanoBase(target, story) {
   while (nanoSessions.size > MAX_NANO_SESSIONS) {
     const [oldKey, old] = nanoSessions.entries().next().value;
     nanoSessions.delete(oldKey);
-    old.then((s) => s.destroy(), () => {});
+    old.then(destroyNanoSession, () => {});
   }
   return job;
 }
@@ -168,14 +196,15 @@ let nanoActive = 0;
 let keepalive = null; // AbortController of the running ping
 
 export async function keepaliveNano({ to, story = '' }) {
-  if (nanoActive || keepalive || performance.now() - nanoLastUse < NANO_KEEPALIVE_IDLE_MS) return { ok: true, skipped: true };
+  if (!nanoEnabled || nanoActive || keepalive || performance.now() - nanoLastUse < NANO_KEEPALIVE_IDLE_MS) return { ok: true, skipped: true };
   const controller = new AbortController();
   keepalive = controller;
   let session;
   try {
     const base = await nanoBase(to, story);
-    if (controller.signal.aborted) return { ok: true, skipped: true };
+    if (controller.signal.aborted || !nanoEnabled) return { ok: true, skipped: true };
     session = await base.clone({ signal: controller.signal });
+    if (controller.signal.aborted || !nanoEnabled) return { ok: true, skipped: true };
     // One generated token is enough to run the model on the GPU; the rest is discarded.
     const reader = session.promptStreaming('Reply with OK.', { signal: controller.signal }).getReader();
     await reader.read();
@@ -191,6 +220,7 @@ export async function keepaliveNano({ to, story = '' }) {
 }
 
 async function nanoTranslate(text, target, context, story, contextLimit) {
+  if (!nanoEnabled) throw setupError('Gemini Nano is inactive because no enabled video tab is visible.');
   keepalive?.abort();
   nanoActive++;
   try {
@@ -210,6 +240,31 @@ let prepared = null; // { key, job: Promise<session|null>, controller }
 let lastPrefilled = false;
 const contextKey = (target, story, context) => `${target}\u0000${story}\u0000${context.join('\n')}`;
 
+export async function setNanoActive(active) {
+  if (active) {
+    nanoEnabled = true;
+    return;
+  }
+  if (!nanoEnabled) return;
+  nanoEnabled = false;
+  nanoGeneration++;
+  keepalive?.abort();
+  keepalive = null;
+  const pending = prepared;
+  prepared = null;
+  const disposals = [];
+  if (pending) {
+    pending.controller.abort();
+    disposals.push(pending.job.then(destroyNanoSession, () => {}));
+  }
+  for (const session of activeNanoSessions) destroyNanoSession(session);
+  for (const sessionPromise of nanoSessions.values()) {
+    disposals.push(sessionPromise.then(destroyNanoSession, () => {}));
+  }
+  nanoSessions.clear();
+  await Promise.all(disposals);
+}
+
 async function contextSession(base, context, signal) {
   const session = await base.clone(signal ? { signal } : undefined);
   if (!context.length) return session;
@@ -217,7 +272,7 @@ async function contextSession(base, context, signal) {
     await session.append([{ role: 'user', content: dialogueContextMessage(context) }], signal ? { signal } : undefined);
     return session;
   } catch (e) {
-    session.destroy();
+    destroyNanoSession(session);
     throw e;
   }
 }
@@ -228,36 +283,51 @@ function takePrepared(key) {
   if (!p) return null;
   if (p.key === key) return p.job;
   p.controller.abort();
-  p.job.then((s) => s?.destroy());
+  p.job.then(destroyNanoSession, () => {});
   return null;
 }
 
 function prepareNext(base, target, story, context) {
-  if (typeof base.append !== 'function') return;
+  if (!nanoEnabled || typeof base.append !== 'function') return;
   takePrepared(null); // drop the stale one
+  const generation = nanoGeneration;
   const controller = new AbortController();
   nanoActive++; // the GPU is busy anyway: no keep-alive ping meanwhile
   const job = contextSession(base, context, controller.signal)
+    .then((session) => {
+      if (!nanoEnabled || generation !== nanoGeneration) {
+        destroyNanoSession(session);
+        return null;
+      }
+      return session;
+    })
     .catch(() => null)
     .finally(() => { nanoActive--; nanoLastUse = performance.now(); });
   prepared = { key: contextKey(target, story, context), job, controller };
 }
 
 async function nanoTranslateLine(text, target, context, story, contextLimit) {
+  const generation = nanoGeneration;
   const base = await nanoBase(target, story);
+  if (!nanoEnabled || generation !== nanoGeneration) throw setupError('Gemini Nano became inactive during translation.');
   const canAppend = typeof base.append === 'function';
   const ask = async (extra = '') => {
     // Each line runs in its own copy of the base session so earlier answers don't pile up in its history.
     let session = canAppend ? await takePrepared(contextKey(target, story, context)) : null;
     if (!extra) lastPrefilled = !!session;
     if (!session) session = canAppend ? await contextSession(base, context) : await base.clone();
+    if (!nanoEnabled || generation !== nanoGeneration) {
+      destroyNanoSession(session);
+      throw setupError('Gemini Nano became inactive during translation.');
+    }
+    activeNanoSessions.add(session);
     try {
       const message = canAppend
         ? (context.length ? `Translate this line:\n${text}` : text)
         : dialogueUserMessage(text, context);
       return cleanLlmOutput(await session.prompt(message + extra));
     } finally {
-      session.destroy();
+      destroyNanoSession(session);
     }
   };
   const out = await ask();

@@ -71,6 +71,7 @@ async function ensureOffscreen() {
 
 async function toOffscreen(type, payload = {}) {
   await ensureOffscreen();
+  if (type !== 'SET_VIDEO_ACTIVITY') await applyVideoActivity();
   // The offscreen listener may not be registered yet right after creation; retry briefly.
   for (let attempt = 0; attempt < 15; attempt++) {
     const res = await chrome.runtime
@@ -86,7 +87,57 @@ async function toOffscreen(type, payload = {}) {
   throw new Error('Offscreen document not responding – open chrome://extensions → "Inspect views: offscreen.html" and check its console.');
 }
 
+const VIDEO_ACTIVITY_KEY = 'videoActivityByTab';
+let videoActivityByTab = new Map();
+const videoActivityReady = chrome.storage.session.get(VIDEO_ACTIVITY_KEY).then((result) => {
+  videoActivityByTab = new Map(Object.entries(result[VIDEO_ACTIVITY_KEY] ?? {})
+    .map(([tabId, state]) => [Number(tabId), state])
+    .filter(([tabId, state]) => Number.isInteger(tabId) && (state?.video || state?.nano)));
+});
+let videoActivityQueue = Promise.resolve();
+let sentVideoActivity = null;
+let temporaryNanoRequests = 0;
+
+async function applyVideoActivity() {
+  await videoActivityReady;
+  const activity = {
+    video: Array.from(videoActivityByTab.values()).some((state) => state.video),
+    nano: temporaryNanoRequests > 0 || Array.from(videoActivityByTab.values()).some((state) => state.nano),
+  };
+  const exists = await hasOffscreen();
+  if (!exists && !activity.video && !activity.nano) {
+    sentVideoActivity = activity;
+    return;
+  }
+  if (exists && sentVideoActivity?.video === activity.video && sentVideoActivity?.nano === activity.nano) return;
+  await toOffscreen('SET_VIDEO_ACTIVITY', activity);
+  sentVideoActivity = activity;
+}
+
+function updateVideoActivity(tabId, video, nano) {
+  const job = videoActivityQueue.then(async () => {
+    await videoActivityReady;
+    if (video || nano) videoActivityByTab.set(tabId, { video: !!video, nano: !!nano && !!video });
+    else videoActivityByTab.delete(tabId);
+    await chrome.storage.session.set({
+      [VIDEO_ACTIVITY_KEY]: Object.fromEntries(videoActivityByTab),
+    });
+    await applyVideoActivity();
+  });
+  videoActivityQueue = job.catch((error) => log('error', 'Video activity update failed:', error));
+  return job;
+}
+
+videoActivityQueue = videoActivityQueue.then(async () => {
+  await videoActivityReady;
+  if (await hasOffscreen()) await applyVideoActivity();
+}).catch((error) => log('error', 'Could not restore video activity:', error));
+
 const handlers = {
+  VIDEO_ACTIVITY: (msg, sender) => {
+    if (sender.frameId !== 0 || sender.tab?.id == null) return { ok: false };
+    return updateVideoActivity(sender.tab.id, msg.video, msg.nano);
+  },
   PYTHON_HEALTH: async () => pythonHealth(await getSettings()),
   PYTHON_OCR: async (msg, sender) => {
     if (sender.url !== chrome.runtime.getURL(OFFSCREEN_PATH)) throw new Error('Python OCR is restricted to the offscreen crop pipeline.');
@@ -96,6 +147,8 @@ const handlers = {
     const tab = sender.tab;
     // captureVisibleTab grabs whatever tab is active, so only the visible tab may request it.
     if (!tab || sender.frameId !== 0) return { skipped: true, reason: 'not a top-level frame' };
+    await videoActivityReady;
+    if (!videoActivityByTab.get(tab.id)?.video) return { skipped: true, reason: 'no active video' };
     if (!tab.active) return { skipped: true, reason: 'tab not active in its window' };
     const isStillActive = async () => (await chrome.tabs.query({ active: true, windowId: tab.windowId }))[0]?.id === tab.id;
     let dataUrl;
@@ -115,31 +168,59 @@ const handlers = {
     return toOffscreen('OCR', { tabId: tab.id, dataUrl, rect: msg.rect, dpr: msg.dpr, opts: { ...msg.opts, capturedAt }, fresh: msg.fresh, debug: panelPorts > 0 });
   },
 
-  OCR_FRAME: (msg, sender) =>
-    toOffscreen('OCR', { tabId: sender.tab?.id, dataUrl: msg.dataUrl, precropped: true, opts: msg.opts, fresh: msg.fresh, debug: panelPorts > 0 }),
+  async OCR_FRAME(msg, sender) {
+    const tabId = sender.tab?.id;
+    await videoActivityReady;
+    if (tabId == null || !videoActivityByTab.get(tabId)?.video) return { skipped: true, reason: 'no active video' };
+    return toOffscreen('OCR', { tabId, dataUrl: msg.dataUrl, precropped: true, opts: msg.opts, fresh: msg.fresh, debug: panelPorts > 0 });
+  },
 
   SEGMENT: (msg) => toOffscreen('SEGMENT', { text: msg.text }),
 
   EXPLORE: (msg) => toOffscreen('EXPLORE', { word: msg.word }),
 
-  async TRANSLATE(msg) {
+  async TRANSLATE(msg, sender) {
     const t0 = performance.now();
     const settings = await getSettings();
-    const res = await translate(msg.text, settings, toOffscreen, msg.context ?? [], msg.story ?? '');
-    log('info', `Translate via ${describeVia(res.via)}${res.cached ? ' (cached)' : ` in ${Math.round(performance.now() - t0)} ms`}: "${msg.text}" → "${res.translation}"`);
-    return res;
+    if (sender.tab?.id != null && ['nano', 'chrome'].includes(settings.translator)) {
+      await videoActivityReady;
+      if (!videoActivityByTab.get(sender.tab.id)?.video) {
+        return { error: 'Translation skipped because this tab has no active video.' };
+      }
+    }
+    const temporaryNano = sender.tab?.id == null && settings.translator === 'nano';
+    if (temporaryNano) temporaryNanoRequests++;
+    try {
+      if (temporaryNano) await applyVideoActivity();
+      const res = await translate(msg.text, settings, toOffscreen, msg.context ?? [], msg.story ?? '');
+      log('info', `Translate via ${describeVia(res.via)}${res.cached ? ' (cached)' : ` in ${Math.round(performance.now() - t0)} ms`}: "${msg.text}" → "${res.translation}"`);
+      return res;
+    } finally {
+      if (temporaryNano) {
+        temporaryNanoRequests--;
+        await applyVideoActivity();
+      }
+    }
   },
 
-  NANO_WARMUP: async (msg) => {
+  NANO_WARMUP: async (msg, sender) => {
     const settings = await getSettings();
     if (settings.translator !== 'nano') return { ok: false };
+    if (sender.tab?.id != null) {
+      await videoActivityReady;
+      if (!videoActivityByTab.get(sender.tab.id)?.nano) return { ok: false };
+    }
     const { target } = globalThis.HSR_langPair(settings);
     return toOffscreen('NANO_WARMUP', { to: target, story: settings.storyContext ? msg.story ?? '' : '' });
   },
 
-  NANO_KEEPALIVE: async (msg) => {
+  NANO_KEEPALIVE: async (msg, sender) => {
     const settings = await getSettings();
     if (settings.translator !== 'nano' || !settings.nanoKeepalive) return { ok: false };
+    if (sender.tab?.id != null) {
+      await videoActivityReady;
+      if (!videoActivityByTab.get(sender.tab.id)?.nano) return { ok: false };
+    }
     const { target } = globalThis.HSR_langPair(settings);
     return toOffscreen('NANO_KEEPALIVE', { to: target, story: settings.storyContext ? msg.story ?? '' : '' });
   },
@@ -235,9 +316,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
+  await updateVideoActivity(tabId, false, false);
   histories.delete(tabId);
   chrome.storage.session.remove(historyKey(tabId));
   if (await hasOffscreen()) chrome.runtime.sendMessage({ target: 'offscreen', type: 'RESET_TAB', tabId }).catch(() => {});
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.status === 'loading') updateVideoActivity(tabId, false, false)
+    .catch((error) => log('error', 'Video activity reset failed:', error));
 });
 
 chrome.runtime.onInstalled.addListener(({ reason }) => {

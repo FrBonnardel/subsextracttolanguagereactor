@@ -50,6 +50,18 @@ export class PaddleRecognizer {
     HSR_log('info', 'ocr', `PaddleOCR ready on ${this.backend.toUpperCase()} in ${Math.round(performance.now() - t0)} ms${adapter ? '' : ' (no WebGPU adapter – CPU fallback)'}`);
   }
 
+  async release() {
+    if (this._loading) await this._loading.catch(() => {});
+    const session = this.session;
+    this._loading = null;
+    this.session = null;
+    this.ort = null;
+    this.backend = null;
+    this.input = null;
+    this.output = null;
+    if (session) await session.release();
+  }
+
   /**
    * @param {CanvasImageSource} source  original (colour) subtitle band
    * @param {{x0:number,y0:number,x1:number,y1:number}} box  line box in source pixels

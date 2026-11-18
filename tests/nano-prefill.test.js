@@ -18,7 +18,8 @@ globalThis.LanguageModel = {
     return make();
   },
 };
-const { translateLocal } = await import('../extension/offscreen/translator.js');
+const { translateLocal, setNanoActive } = await import('../extension/offscreen/translator.js');
+await setNanoActive(true);
 const nano = (text, context) => translateLocal({ provider: 'nano', text, from: 'zh', to: 'en', context, contextLimit: 3 });
 
 test('Gemini Nano pre-processes the next line\'s context so only the new line is left to process', async () => {

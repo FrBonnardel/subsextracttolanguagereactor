@@ -103,6 +103,7 @@ export class OcrEngine {
     this.native = new NativeOcr();
     this.prompt = new PromptOcr();
     this.paddleRetryAt = 0;
+    this.videoActive = false;
   }
 
   process(msg) {
@@ -115,6 +116,19 @@ export class OcrEngine {
   resetTab(tabId) {
     this.tabs.delete(tabId);
     this.pythonTabs.delete(tabId);
+  }
+
+  setVideoActivity(active) {
+    this.videoActive = active;
+    if (active) return Promise.resolve();
+    const job = this.queue.then(async () => {
+      if (this.videoActive) return;
+      this.tabs.clear();
+      this.pythonTabs.clear();
+      await Promise.all([this.paddle.release(), this.prompt.destroy()]);
+    });
+    this.queue = job.catch(() => {});
+    return job;
   }
 
   async _ensureWorker(opts) {
